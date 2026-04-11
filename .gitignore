@@ -1,8 +1,9 @@
 data/
+.ai/
 
-report/report-blx.bib
-report/report.bbl
-report/report.synctex.gz
+report/build_latex/report-blx.bib
+report/build_latex/report.bbl
+report/build_latex/report.synctex.gz
 
 .DS_Store
 
