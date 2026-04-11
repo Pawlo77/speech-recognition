@@ -39,11 +39,32 @@ class SpeechCommandsDataset:
     EXPECTED_MAIN_DIR: Final[str] = "train/audio"
     """Required relative directory for availability check."""
 
-    VAL_LIST_FILE: Final[str] = "train/validation_list.txt"
+    VAL_LIST_FILE: Final[str] = "train/split_lists/validation_list.txt"
     """Relative path to official validation split list."""
 
-    TEST_LIST_FILE: Final[str] = "train/testing_list.txt"
+    TEST_LIST_FILE: Final[str] = "train/split_lists/testing_list.txt"
     """Relative path to official testing split list."""
+
+    TRAIN_LIST_FILE: Final[str] = "train/split_lists/training_list.txt"
+    """Relative path to generated training split list."""
+
+    SMALL_VAL_LIST_FILE: Final[str] = "train/split_lists/small_validation_list.txt"
+    """Relative path to generated validation split list for smaller dataset mode."""
+
+    SMALL_TEST_LIST_FILE: Final[str] = "train/split_lists/small_testing_list.txt"
+    """Relative path to generated testing split list for smaller dataset mode."""
+
+    SMALL_TRAIN_LIST_FILE: Final[str] = "train/split_lists/small_training_list.txt"
+    """Relative path to generated training split list for smaller dataset mode."""
+
+    EXTENDED_TRAIN_LIST_FILE: Final[str] = "train/split_lists/extended_training_list.txt"
+    """Relative path to generated training split list for extended dataset mode."""
+
+    EXTENDED_VAL_LIST_FILE: Final[str] = "train/split_lists/extended_validation_list.txt"
+    """Relative path to generated validation split list for extended dataset mode."""
+
+    EXTENDED_TEST_LIST_FILE: Final[str] = "train/split_lists/extended_testing_list.txt"
+    """Relative path to generated testing split list for extended dataset mode."""
 
     TRAIN_LABELS_CSV: Final[str] = "train.csv"
     """Relative path to optional filename-label mapping CSV."""
@@ -54,39 +75,70 @@ class SpeechCommandsDataset:
     UNKNOWN_LABEL: Final[str] = "__unknown__"
     """Fallback label for unlabeled test items."""
 
+    BACKGROUND_NOISE_LABEL: Final[str] = "_background_noise_"
+    """Label name for background noise directory."""
+
+    SMALLER_DATASET_LABELS: Final[set[str]] = {
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "zero",
+    }
+
     def __init__(
         self,
         repo_root: str | Path | None = None,
         data_dir_name: str = "data/kaggle_speech_commands",
         val_ratio: float = 0.1,
+        test_ratio: float = 0.1,
+        unknown_label_samples_size: int = 1500,
         seed: int = 42,
         auto_download: bool = True,
         only_1sec_samples: bool = True,
+        use_smaller_dataset: bool = False,
+        use_extended_dataset: bool = False,  # unknown and background noise
     ) -> None:
         """Initialize dataset manager."""
         if not 0.0 < val_ratio < 1.0:
             raise ValueError("val_ratio must be between 0 and 1 (exclusive).")
+
+        if use_smaller_dataset and use_extended_dataset:
+            raise ValueError("Cannot use both smaller and extended dataset modes simultaneously.")
 
         self.repo_root: Path = Path(repo_root).resolve() if repo_root else self._infer_repo_root()
         self.data_dir: Path = self.repo_root / data_dir_name
         self.dataset_root: Path = self.data_dir / self.KAGGLE_SLUG
 
         self.val_ratio: float = val_ratio
+        self.test_ratio: float = test_ratio
         self.seed: int = seed
         self.only_1sec_samples: bool = only_1sec_samples
+        self.unknown_label_samples_size: int = unknown_label_samples_size
+        self.use_smaller_dataset: bool = use_smaller_dataset
+        self.use_extended_dataset: bool = use_extended_dataset
 
         logger.debug(
             (
                 "Initializing SpeechCommandsDataset with repo_root=%s, data_dir=%s, "
-                "dataset_root=%s, val_ratio=%s, seed=%s, auto_download=%s, only_1sec_samples=%s"
+                "dataset_root=%s, val_ratio=%s, test_ratio=%s, seed=%s, auto_download=%s, "
+                "only_1sec_samples=%s, use_smaller_dataset=%s, use_extended_dataset=%s"
             ),
             self.repo_root,
             self.data_dir,
             self.dataset_root,
             self.val_ratio,
+            self.test_ratio,
             self.seed,
             auto_download,
             self.only_1sec_samples,
+            self.use_smaller_dataset,
+            self.use_extended_dataset,
         )
 
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -100,6 +152,30 @@ class SpeechCommandsDataset:
                     "Set auto_download=True or call download()."
                 )
 
+        if not (
+            self.dataset_root / "train" / "audio" / "_background_noise_" / "_background_noise_long"
+        ).exists():
+            self._split_background_noise_samples()
+
+        if (
+            not self.use_smaller_dataset
+            and self.use_extended_dataset
+            and not (self.dataset_root / "train" / "audio" / self.UNKNOWN_LABEL).exists()
+        ):
+            self._create_unknown_label_samples()
+
+        if (
+            self.use_smaller_dataset
+            and not (self.dataset_root / self.SMALL_TRAIN_LIST_FILE).exists()
+        ):
+            self._create_minimal_dataset()
+
+        if (
+            self.use_extended_dataset
+            and not (self.dataset_root / self.EXTENDED_TRAIN_LIST_FILE).exists()
+        ):
+            self._create_extended_dataset()
+
         self._samples: dict[Split, list[Sample]] = self._build_splits()
         logger.info("Dataset initialized with split sizes: %s", self.stats())
 
@@ -111,11 +187,17 @@ class SpeechCommandsDataset:
         """Download and stage dataset locally."""
         logger.info("Preparing dataset download into '%s' (force=%s)", self.data_dir, force)
         if force and self.dataset_root.exists():
-            logger.info("Removing existing dataset root due to force=True: %s", self.dataset_root)
+            logger.info(
+                "Removing existing dataset root due to force=True: %s",
+                self.dataset_root,
+            )
             shutil.rmtree(self.dataset_root)
 
         if self.is_available():
-            logger.info("Dataset already available at '%s'. Skipping download.", self.dataset_root)
+            logger.info(
+                "Dataset already available at '%s'. Skipping download.",
+                self.dataset_root,
+            )
             return self.dataset_root
 
         try:
@@ -257,7 +339,8 @@ class SpeechCommandsDataset:
             return None
 
         logger.debug(
-            "Found candidate nested layout roots: %s", [match.parent.parent for match in matches]
+            "Found candidate nested layout roots: %s",
+            [match.parent.parent for match in matches],
         )
         return matches[0].parent.parent
 
@@ -324,18 +407,33 @@ class SpeechCommandsDataset:
             raise FileNotFoundError(f"Missing train audio directory: {train_audio}")
 
         all_labeled = self._collect_labeled_samples(train_audio)
+        if self.use_extended_dataset:
+            split_candidates = all_labeled
+        elif self.use_smaller_dataset:
+            split_candidates = [
+                sample for sample in all_labeled if sample.label in self.SMALLER_DATASET_LABELS
+            ]
+        else:
+            split_candidates = [
+                sample
+                for sample in all_labeled
+                if sample.label not in {self.UNKNOWN_LABEL, self.BACKGROUND_NOISE_LABEL}
+            ]
 
-        val_rel_paths = self._read_rel_paths(self.dataset_root / self.VAL_LIST_FILE)
-        test_rel_paths = self._read_rel_paths(self.dataset_root / self.TEST_LIST_FILE)
+        train_list_file, val_list_file, test_list_file = self._split_list_files()
+        train_rel_paths = self._read_rel_paths(train_list_file)
+        val_rel_paths = self._read_rel_paths(val_list_file)
+        test_rel_paths = self._read_rel_paths(test_list_file)
 
         if val_rel_paths or test_rel_paths:
             logger.info(
-                "Building splits using official lists (validation=%d, testing=%d)",
+                "Building splits using official lists (training=%d, validation=%d, testing=%d)",
+                len(train_rel_paths),
                 len(val_rel_paths),
                 len(test_rel_paths),
             )
-            train_samples, val_samples = self._split_with_official_lists(
-                all_labeled=all_labeled,
+            train_samples, val_samples, test_samples = self._split_with_official_lists(
+                all_labeled=split_candidates,
                 train_audio_dir=train_audio,
                 val_rel_paths=val_rel_paths,
                 test_rel_paths=test_rel_paths,
@@ -344,14 +442,15 @@ class SpeechCommandsDataset:
             logger.info(
                 (
                     "Official split lists not found. "
-                    "Falling back to random split (val_ratio=%s, seed=%s)."
+                    "Creating random splits (val_ratio=%s, test_ratio=%s, seed=%s)."
                 ),
                 self.val_ratio,
+                self.test_ratio,
                 self.seed,
             )
-            train_samples, val_samples = self._random_train_val_split(all_labeled)
-
-        test_samples = self._collect_competition_test_samples()
+            train_samples, val_samples, test_samples = self._random_train_val_test_split(
+                split_candidates
+            )
 
         if self.only_1sec_samples:
             logger.info("Filtering splits to keep only 1-second samples (only_1sec_samples=True)")
@@ -387,24 +486,25 @@ class SpeechCommandsDataset:
         train_audio_dir: Path,
         val_rel_paths: list[str],
         test_rel_paths: list[str],
-    ) -> tuple[list[Sample], list[Sample]]:
+    ) -> tuple[list[Sample], list[Sample], list[Sample]]:
         """Split using official validation/testing lists."""
         val_set = set(val_rel_paths)
         test_set = set(test_rel_paths)
 
         train_samples: list[Sample] = []
         val_samples: list[Sample] = []
+        test_samples: list[Sample] = []
 
         for sample in all_labeled:
             rel = sample.path.relative_to(train_audio_dir).as_posix()
             if rel in val_set:
                 val_samples.append(sample)
             elif rel in test_set:
-                continue
+                test_samples.append(sample)
             else:
                 train_samples.append(sample)
 
-        return train_samples, val_samples
+        return train_samples, val_samples, test_samples
 
     def _collect_labeled_samples(self, train_audio: Path) -> list[Sample]:
         """Collect labeled samples from train/audio."""
@@ -437,21 +537,78 @@ class SpeechCommandsDataset:
         logger.debug("Loaded %d entries from split file '%s'", len(rel_paths), file_path)
         return rel_paths
 
-    def _random_train_val_split(self, samples: list[Sample]) -> tuple[list[Sample], list[Sample]]:
-        """Create deterministic random train/val split."""
+    def _random_train_val_test_split(
+        self, samples: list[Sample]
+    ) -> tuple[list[Sample], list[Sample], list[Sample]]:
+        """Create deterministic random train/val/test split."""
         shuffled = samples[:]
         rng = random.Random(self.seed)  # noqa: S311 - deterministic split only
         rng.shuffle(shuffled)
 
         n_val = max(1, int(len(shuffled) * self.val_ratio))
+        n_test = max(1, int(len(shuffled) * self.test_ratio))
         val_samples = shuffled[:n_val]
-        train_samples = shuffled[n_val:]
+        test_samples = shuffled[n_val : n_val + n_test]
+        train_samples = shuffled[n_val + n_test :]
         logger.debug(
-            "Random split produced train=%d and val=%d samples",
+            "Random split produced train=%d, val=%d, and test=%d samples",
             len(train_samples),
             len(val_samples),
+            len(test_samples),
         )
-        return train_samples, val_samples
+
+        train_audio_dir = self.dataset_root / "train" / "audio"
+        train_rel_paths = sorted(
+            sample.path.relative_to(train_audio_dir).as_posix() for sample in train_samples
+        )
+        val_rel_paths = sorted(
+            sample.path.relative_to(train_audio_dir).as_posix() for sample in val_samples
+        )
+        test_rel_paths = sorted(
+            sample.path.relative_to(train_audio_dir).as_posix() for sample in test_samples
+        )
+
+        train_list_file, val_list_file, test_list_file = self._split_list_files()
+        self._write_rel_paths(train_list_file, train_rel_paths)
+        self._write_rel_paths(val_list_file, val_rel_paths)
+        self._write_rel_paths(test_list_file, test_rel_paths)
+
+        logger.info(
+            "Saved random split path lists: training=%d, validation=%d, testing=%d",
+            len(train_rel_paths),
+            len(val_rel_paths),
+            len(test_rel_paths),
+        )
+
+        return train_samples, val_samples, test_samples
+
+    def _write_rel_paths(self, file_path: Path, rel_paths: list[str]) -> None:
+        """Write split relative paths to txt file, one path per line."""
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        with file_path.open("w", encoding="utf-8") as handle:
+            if rel_paths:
+                handle.write("\n".join(rel_paths))
+                handle.write("\n")
+
+    def _split_list_files(self) -> tuple[Path, Path, Path]:
+        """Return (training_list_path, validation_list_path, testing_list_path) for current mode."""
+        if self.use_extended_dataset:
+            return (
+                self.dataset_root / self.EXTENDED_TRAIN_LIST_FILE,
+                self.dataset_root / self.EXTENDED_VAL_LIST_FILE,
+                self.dataset_root / self.EXTENDED_TEST_LIST_FILE,
+            )
+        if self.use_smaller_dataset:
+            return (
+                self.dataset_root / self.SMALL_TRAIN_LIST_FILE,
+                self.dataset_root / self.SMALL_VAL_LIST_FILE,
+                self.dataset_root / self.SMALL_TEST_LIST_FILE,
+            )
+        return (
+            self.dataset_root / self.TRAIN_LIST_FILE,
+            self.dataset_root / self.VAL_LIST_FILE,
+            self.dataset_root / self.TEST_LIST_FILE,
+        )
 
     def _collect_competition_test_samples(self) -> list[Sample]:
         """Collect competition test samples."""
@@ -503,3 +660,225 @@ class SpeechCommandsDataset:
             logger.debug("Loaded %d label mappings from '%s'", len(mapping), labels_csv)
 
         return mapping
+
+    def _split_background_noise_samples(self) -> list[Sample]:
+        """Split background-noise files into 1-second segments.
+
+        Original long files are moved to a separate directory.
+        """
+
+        logger.info(
+            "Splitting background noise samples into 1-second segments and "
+            "moving originals to a separate directory."
+        )
+
+        noise_dir = self.dataset_root / "train" / "audio" / "_background_noise_"
+        long_noise_dir = noise_dir / "_background_noise_long"
+
+        long_noise_dir.mkdir(parents=True, exist_ok=True)
+
+        for noise_file in noise_dir.glob("*.wav"):
+            with wave.open(str(noise_file), "rb") as wav:
+                n_channels = wav.getnchannels()
+                sample_width = wav.getsampwidth()
+                frame_rate = wav.getframerate()
+                n_frames = wav.getnframes()
+
+                if frame_rate != 16000:
+                    logger.warning(
+                        "Background noise file '%s' has unexpected sample rate %d. Skipping.",
+                        noise_file,
+                        frame_rate,
+                    )
+                    continue
+
+                if n_frames <= 16000:
+                    logger.debug(
+                        "Background noise file '%s' is already 1 second or shorter. "
+                        "Skipping splitting.",
+                        noise_file,
+                    )
+                    continue
+
+                frames_per_segment = 16000  # 1 second segments
+                n_segments = n_frames // frames_per_segment
+
+                for i in range(n_segments):
+                    segment_frames = wav.readframes(frames_per_segment)
+                    segment_path = noise_file.parent / f"{noise_file.stem}_segment_{i}.wav"
+                    with wave.open(str(segment_path), "wb") as segment_wav:
+                        segment_wav.setnchannels(n_channels)
+                        segment_wav.setsampwidth(sample_width)
+                        segment_wav.setframerate(frame_rate)
+                        segment_wav.writeframes(segment_frames)
+
+            shutil.move(str(noise_file), str(long_noise_dir / noise_file.name))
+
+    def _create_unknown_label_samples(self) -> None:
+        """Create the __unknown__ label as interpolation of existing samples."""
+
+        logger.info("Creating __unknown__ label samples as interpolation of existing samples.")
+
+        unknown_dir = self.dataset_root / "train" / "audio" / self.UNKNOWN_LABEL
+        unknown_dir.mkdir(parents=True, exist_ok=True)
+        existing_unknown_samples = len(list(unknown_dir.glob("*.wav")))
+        samples_to_create = self.unknown_label_samples_size - existing_unknown_samples
+
+        existing_samples = []
+        for label_dir in (self.dataset_root / "train" / "audio").iterdir():
+            if label_dir.is_dir() and label_dir.name not in (
+                "_background_noise_",
+                self.UNKNOWN_LABEL,
+            ):
+                existing_samples.extend(label_dir.glob("*.wav"))
+        rng = random.Random(self.seed)  # noqa: S311 - deterministic sampling only
+        for i in range(samples_to_create):
+            sample_a, sample_b = rng.sample(existing_samples, 2)
+
+            attempts = 0
+            while sample_a.parent.name == sample_b.parent.name:
+                sample_a, sample_b = rng.sample(existing_samples, 2)
+                attempts += 1
+                if attempts >= 100:
+                    logger.warning(
+                        "Could not sample files from different classes after "
+                        "%d attempts. Skipping.",
+                        attempts,
+                    )
+                    break
+
+            with (
+                wave.open(str(sample_a), "rb") as wav_a,
+                wave.open(str(sample_b), "rb") as wav_b,
+            ):
+                if (
+                    wav_a.getnchannels() != wav_b.getnchannels()
+                    or wav_a.getsampwidth() != wav_b.getsampwidth()
+                    or wav_a.getframerate() != wav_b.getframerate()
+                ):
+                    logger.warning(
+                        "Skipping interpolation of '%s' and '%s' due to "
+                        "incompatible audio parameters.",
+                        sample_a,
+                        sample_b,
+                    )
+                    continue
+
+                frames_a = wav_a.readframes(wav_a.getnframes())
+                frames_b = wav_b.readframes(wav_b.getnframes())
+                min_length = min(len(frames_a), len(frames_b))
+                interpolated_frames = bytes(
+                    (a + b) // 2
+                    for a, b in zip(frames_a[:min_length], frames_b[:min_length], strict=False)
+                )
+
+                unknown_sample_path = unknown_dir / f"unknown_{existing_unknown_samples + i}.wav"
+                with wave.open(str(unknown_sample_path), "wb") as unknown_wav:
+                    unknown_wav.setnchannels(wav_a.getnchannels())
+                    unknown_wav.setsampwidth(wav_a.getsampwidth())
+                    unknown_wav.setframerate(wav_a.getframerate())
+                    unknown_wav.writeframes(interpolated_frames)
+
+    def _create_minimal_dataset(self) -> None:
+        """Create minimal split lists without modifying dataset directories."""
+        train_audio_dir = self.dataset_root / "train" / "audio"
+        if not train_audio_dir.exists():
+            raise FileNotFoundError(f"Missing train audio directory: {train_audio_dir}")
+
+        logger.info(
+            "Creating minimal dataset with labels: %s",
+            sorted(self.SMALLER_DATASET_LABELS),
+        )
+
+        selected_samples = [
+            sample
+            for sample in self._collect_labeled_samples(train_audio_dir)
+            if sample.label in self.SMALLER_DATASET_LABELS
+        ]
+        if not selected_samples:
+            raise RuntimeError(
+                "Minimal dataset is empty after filtering to SMALLER_DATASET_LABELS."
+            )
+
+        shuffled = selected_samples[:]
+        rng = random.Random(self.seed)  # noqa: S311 - deterministic split only
+        rng.shuffle(shuffled)
+
+        n_val = max(1, int(len(shuffled) * self.val_ratio))
+        n_test = max(1, int(len(shuffled) * self.test_ratio))
+
+        val_samples = shuffled[:n_val]
+        test_samples = shuffled[n_val : n_val + n_test]
+        train_samples = shuffled[n_val + n_test :]
+
+        train_rel_paths = sorted(
+            sample.path.relative_to(train_audio_dir).as_posix() for sample in train_samples
+        )
+        val_rel_paths = sorted(
+            sample.path.relative_to(train_audio_dir).as_posix() for sample in val_samples
+        )
+        test_rel_paths = sorted(
+            sample.path.relative_to(train_audio_dir).as_posix() for sample in test_samples
+        )
+
+        self._write_rel_paths(self.dataset_root / self.SMALL_TRAIN_LIST_FILE, train_rel_paths)
+        self._write_rel_paths(self.dataset_root / self.SMALL_VAL_LIST_FILE, val_rel_paths)
+        self._write_rel_paths(self.dataset_root / self.SMALL_TEST_LIST_FILE, test_rel_paths)
+
+        logger.info(
+            "Minimal dataset lists saved: train=%d, val=%d, test=%d",
+            len(train_rel_paths),
+            len(val_rel_paths),
+            len(test_rel_paths),
+        )
+
+    def _create_extended_dataset(self) -> None:
+        """Create extended split lists that include unknown and background noise."""
+        train_audio_dir = self.dataset_root / "train" / "audio"
+        if not train_audio_dir.exists():
+            raise FileNotFoundError(f"Missing train audio directory: {train_audio_dir}")
+
+        extended_samples = self._collect_labeled_samples(train_audio_dir)
+        if not extended_samples:
+            raise RuntimeError("Extended dataset is empty; no samples were found.")
+
+        shuffled = extended_samples[:]
+        rng = random.Random(self.seed)  # noqa: S311 - deterministic split only
+        rng.shuffle(shuffled)
+
+        n_val = max(1, int(len(shuffled) * self.val_ratio))
+        n_test = max(1, int(len(shuffled) * self.test_ratio))
+
+        val_samples = shuffled[:n_val]
+        test_samples = shuffled[n_val : n_val + n_test]
+        train_samples = shuffled[n_val + n_test :]
+
+        train_rel_paths = sorted(
+            sample.path.relative_to(train_audio_dir).as_posix() for sample in train_samples
+        )
+        val_rel_paths = sorted(
+            sample.path.relative_to(train_audio_dir).as_posix() for sample in val_samples
+        )
+        test_rel_paths = sorted(
+            sample.path.relative_to(train_audio_dir).as_posix() for sample in test_samples
+        )
+
+        self._write_rel_paths(
+            self.dataset_root / self.EXTENDED_TRAIN_LIST_FILE,
+            train_rel_paths,
+        )
+        self._write_rel_paths(
+            self.dataset_root / self.EXTENDED_VAL_LIST_FILE,
+            val_rel_paths,
+        )
+        self._write_rel_paths(
+            self.dataset_root / self.EXTENDED_TEST_LIST_FILE,
+            test_rel_paths,
+        )
+
+        logger.info(
+            "Extended dataset lists saved: train=%d, val=%d, test=%d",
+            len(train_rel_paths),
+            len(val_rel_paths),
+            len(test_rel_paths),
+        )
