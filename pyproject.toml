@@ -20,6 +20,8 @@ dependencies = [
     "pytest>=9.0.2",
     "python-dotenv>=1.2.2",
     "seaborn>=0.13.2",
+    "torch>=2.8.0",
+    "torchaudio>=2.8.0",
     "tqdm>=4.67.0",
 ]
 
