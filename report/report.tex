@@ -46,6 +46,13 @@ To provide a genuine evaluation of raw architectural capacity, this project leve
 % TODO: Check it
 While the canonical Speech Commands v0.01 release is designed to contain uniform one-second samples at $16$ kHz, we observe that the Kaggle variant exhibits distinct deviations: approximately $89.8\%$ of samples are exactly one second, but outliers range from $0.37$ to $95.18$ seconds. The full taxonomy contains $32$ classes in total ($30$ command labels, plus \texttt{\_\_unknown\_\_} and \texttt{\_\_silence\_\_}). Models must therefore be formulated to robustly handle transient temporal padding while strictly discriminating across a multi-class landscape.
 
+\subsection{Unknown-Class Synthesis Methodology}
+For the extended dataset configuration, we generate additional \texttt{\_\_unknown\_\_} examples directly from the training corpus without external models. Candidate source clips are drawn from command classes only (excluding \texttt{\_\_unknown\_\_} and background-noise folders), with the hard constraint that clips within one synthetic sample must come from different classes.
+
+Each synthetic item is formed by blending $2$ or $3$ one-second clips. Before mixing, each source is mean-centered, RMS-normalized toward a shared target level, and lightly smoothed with a short delayed component to reduce abrupt local transients. The final mixture is then produced by dense short-frame overlap where all sources remain active throughout the full second with slowly varying weights, encouraging spectro-temporal continuity rather than hard segment boundaries.
+
+To avoid regenerating the same example, uniqueness is tracked at the source-file level (sorted source path tuple), not at the class-combination level. After synthesis, each candidate is passed through an envelope-based smoothness gate (windowed RMS trajectory checks for abrupt jumps and deep internal valleys). If a candidate fails this gate, it is discarded and regenerated in a retry loop; only accepted candidates are written to the \texttt{\_\_unknown\_\_} directory.
+
 
 % TODO: Insert a visual of the class distribution in the training set, highlighting the dominance of the \texttt{\_\_unknown\_\_} class.
 % TODO: Insert EDA visualizations of the raw audio waveforms, showing the diversity of temporal patterns across different command words. Keep entire section under 1.5 pages.

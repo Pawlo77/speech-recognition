@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import random
+import wave
+from array import array
 from pathlib import Path
 from typing import cast
 
+import speech_recognition.dataset as dataset_module
 from speech_recognition.dataset import Sample, SpeechCommandsDataset
 
 
@@ -121,3 +125,107 @@ def test_stage_download_extracts_archives_when_needed(tmp_path: Path) -> None:
 
     assert called_archives == ["train.7z", "test.7z"]
     assert (ds.dataset_root / "train" / "audio").exists()
+
+
+def test_create_unknown_label_samples_does_not_reuse_source_pair(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Unknown sample generation should use multiple distinct source clips."""
+    ds = object.__new__(SpeechCommandsDataset)
+    ds.dataset_root = tmp_path / SpeechCommandsDataset.KAGGLE_SLUG
+    ds.dataset_root.mkdir(parents=True)
+    ds.seed = 123
+    ds.unknown_label_samples_size = 1
+
+    audio_root = ds.dataset_root / "train" / "audio"
+    class_one = audio_root / "yes"
+    class_two = audio_root / "no"
+    class_three = audio_root / "up"
+    class_one.mkdir(parents=True)
+    class_two.mkdir(parents=True)
+    class_three.mkdir(parents=True)
+
+    def write_wav(path: Path) -> None:
+        with wave.open(str(path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(16000)
+            samples = array(
+                "h",
+                [int(1200 * ((index % 32) - 16) / 16) for index in range(16000)],
+            )
+            wav_file.writeframes(samples.tobytes())
+
+    file_a = class_one / "a.wav"
+    file_b = class_one / "b.wav"
+    file_c = class_two / "c.wav"
+    file_d = class_two / "d.wav"
+    file_e = class_three / "e.wav"
+    for path in (file_a, file_b, file_c, file_d, file_e):
+        write_wav(path)
+
+    label_plan = ["yes", "no", "up"]
+    file_plan = {
+        "yes": [file_a],
+        "no": [file_c],
+        "up": [file_e],
+    }
+
+    original_random_class = random.Random
+
+    class FakeRandom:
+        def __init__(self, seed: int) -> None:
+            self._rng = original_random_class(seed)
+
+        def sample(self, population, k: int):
+            if population and isinstance(population[0], str):
+                return label_plan[:k]
+            if population and isinstance(population[0], Path):
+                return [file_plan[population[0].parent.name][0]]
+            return population[:k]
+
+        def random(self) -> float:
+            return 0.0
+
+        def uniform(self, a: float, b: float) -> float:
+            return self._rng.uniform(a, b)
+
+        def randint(self, a: int, b: int) -> int:
+            return self._rng.randint(a, b)
+
+    opened_pairs: list[tuple[Path, str]] = []
+    original_wave_open = dataset_module.wave.open
+
+    def tracking_wave_open(file, mode="rb", *args, **kwargs):
+        if mode == "rb":
+            opened_pairs.append((Path(file), mode))
+        return original_wave_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(dataset_module.random, "Random", FakeRandom)
+    monkeypatch.setattr(dataset_module.wave, "open", tracking_wave_open)
+    monkeypatch.setattr(
+        ds,
+        "_get_unknown_source_profile",
+        lambda path: {
+            file_a.as_posix(): ("female", 0.20),
+            file_c.as_posix(): ("female", 0.52),
+            file_e.as_posix(): ("female", 0.84),
+        }[Path(path).as_posix()],
+    )
+
+    ds._create_unknown_label_samples()
+
+    unknown_dir = audio_root / SpeechCommandsDataset.UNKNOWN_LABEL
+    unknown_files = sorted(unknown_dir.glob("*.wav"))
+
+    assert len(unknown_files) == 1
+    assert {path.name for path, mode in opened_pairs if mode == "rb"} == {
+        "a.wav",
+        "c.wav",
+        "e.wav",
+    }
+    assert {path.parent.name for path, mode in opened_pairs if mode == "rb"} == {
+        "yes",
+        "no",
+        "up",
+    }

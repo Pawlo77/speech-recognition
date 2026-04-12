@@ -14,6 +14,8 @@ from typing import Final, Literal
 import kagglehub
 from dotenv import load_dotenv
 
+from .unknown import UnknownSampleGenerationMixin
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -30,7 +32,7 @@ class Sample:
     filename: str
 
 
-class SpeechCommandsDataset:
+class SpeechCommandsDataset(UnknownSampleGenerationMixin):
     """Manage local/downloaded Kaggle speech dataset and splits."""
 
     KAGGLE_SLUG: Final[str] = "tensorflow-speech-recognition-challenge"
@@ -97,7 +99,7 @@ class SpeechCommandsDataset:
         data_dir_name: str = "data/kaggle_speech_commands",
         val_ratio: float = 0.1,
         test_ratio: float = 0.1,
-        unknown_label_samples_size: int = 1500,
+        unknown_label_samples_size: int = 10000,
         seed: int = 42,
         auto_download: bool = True,
         only_1sec_samples: bool = True,
@@ -122,6 +124,7 @@ class SpeechCommandsDataset:
         self.unknown_label_samples_size: int = unknown_label_samples_size
         self.use_smaller_dataset: bool = use_smaller_dataset
         self.use_extended_dataset: bool = use_extended_dataset
+        self._unknown_source_profile_cache: dict[str, tuple[str, float]] = {}
 
         logger.debug(
             (
@@ -158,9 +161,8 @@ class SpeechCommandsDataset:
             self._split_background_noise_samples()
 
         if (
-            not self.use_smaller_dataset
-            and self.use_extended_dataset
-            and not (self.dataset_root / "train" / "audio" / self.UNKNOWN_LABEL).exists()
+            not self.use_smaller_dataset and self.use_extended_dataset
+            # and not (self.dataset_root / "train" / "audio" / self.UNKNOWN_LABEL).exists()
         ):
             self._create_unknown_label_samples()
 
@@ -713,71 +715,6 @@ class SpeechCommandsDataset:
                         segment_wav.writeframes(segment_frames)
 
             shutil.move(str(noise_file), str(long_noise_dir / noise_file.name))
-
-    def _create_unknown_label_samples(self) -> None:
-        """Create the __unknown__ label as interpolation of existing samples."""
-
-        logger.info("Creating __unknown__ label samples as interpolation of existing samples.")
-
-        unknown_dir = self.dataset_root / "train" / "audio" / self.UNKNOWN_LABEL
-        unknown_dir.mkdir(parents=True, exist_ok=True)
-        existing_unknown_samples = len(list(unknown_dir.glob("*.wav")))
-        samples_to_create = self.unknown_label_samples_size - existing_unknown_samples
-
-        existing_samples = []
-        for label_dir in (self.dataset_root / "train" / "audio").iterdir():
-            if label_dir.is_dir() and label_dir.name not in (
-                "_background_noise_",
-                self.UNKNOWN_LABEL,
-            ):
-                existing_samples.extend(label_dir.glob("*.wav"))
-        rng = random.Random(self.seed)  # noqa: S311 - deterministic sampling only
-        for i in range(samples_to_create):
-            sample_a, sample_b = rng.sample(existing_samples, 2)
-
-            attempts = 0
-            while sample_a.parent.name == sample_b.parent.name:
-                sample_a, sample_b = rng.sample(existing_samples, 2)
-                attempts += 1
-                if attempts >= 100:
-                    logger.warning(
-                        "Could not sample files from different classes after "
-                        "%d attempts. Skipping.",
-                        attempts,
-                    )
-                    break
-
-            with (
-                wave.open(str(sample_a), "rb") as wav_a,
-                wave.open(str(sample_b), "rb") as wav_b,
-            ):
-                if (
-                    wav_a.getnchannels() != wav_b.getnchannels()
-                    or wav_a.getsampwidth() != wav_b.getsampwidth()
-                    or wav_a.getframerate() != wav_b.getframerate()
-                ):
-                    logger.warning(
-                        "Skipping interpolation of '%s' and '%s' due to "
-                        "incompatible audio parameters.",
-                        sample_a,
-                        sample_b,
-                    )
-                    continue
-
-                frames_a = wav_a.readframes(wav_a.getnframes())
-                frames_b = wav_b.readframes(wav_b.getnframes())
-                min_length = min(len(frames_a), len(frames_b))
-                interpolated_frames = bytes(
-                    (a + b) // 2
-                    for a, b in zip(frames_a[:min_length], frames_b[:min_length], strict=False)
-                )
-
-                unknown_sample_path = unknown_dir / f"unknown_{existing_unknown_samples + i}.wav"
-                with wave.open(str(unknown_sample_path), "wb") as unknown_wav:
-                    unknown_wav.setnchannels(wav_a.getnchannels())
-                    unknown_wav.setsampwidth(wav_a.getsampwidth())
-                    unknown_wav.setframerate(wav_a.getframerate())
-                    unknown_wav.writeframes(interpolated_frames)
 
     def _create_minimal_dataset(self) -> None:
         """Create minimal split lists without modifying dataset directories."""
