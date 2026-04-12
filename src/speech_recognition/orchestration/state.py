@@ -12,6 +12,9 @@ from ..config import ExperimentConfig
 PHASE_ORDER: tuple[str, ...] = ("phase-1", "phase-2", "phase-3", "phase-4")
 """Canonical execution order for the pipeline."""
 
+STATE_SCHEMA_VERSION = 1
+"""Current schema version for persisted pipeline state."""
+
 
 def _utc_now() -> str:
     """Return the current UTC timestamp as an ISO-8601 string."""
@@ -46,6 +49,14 @@ def _read_json(path: Path) -> dict[str, Any]:
     """Read a JSON document from disk."""
 
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _phase_directory_name(phase: str) -> str:
+    """Convert a phase name to a stable output directory name."""
+
+    if phase not in PHASE_ORDER:
+        raise ValueError(f"Unknown phase '{phase}'.")
+    return phase.replace("-", "_")
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,17 +94,22 @@ class PhaseArtifact:
 class PipelineState:
     """Persistent run state for the full pipeline."""
 
-    schema_version: int = 1
+    schema_version: int = STATE_SCHEMA_VERSION
     run_name: str = "default"
     run_root: str = ""
     config: dict[str, Any] = field(default_factory=dict)
     completed_phases: tuple[str, ...] = ()
     phase_artifacts: dict[str, PhaseArtifact] = field(default_factory=dict)
+    best_params: dict[str, dict[str, Any]] = field(default_factory=dict)
+    metrics: dict[str, dict[str, float]] = field(default_factory=dict)
+    selected_phase_outputs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    checkpoint_pointers: dict[str, str] = field(default_factory=dict)
+    latest_checkpoint: str | None = None
     created_at: str = field(default_factory=_utc_now)
     updated_at: str = field(default_factory=_utc_now)
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1:
+        if self.schema_version != STATE_SCHEMA_VERSION:
             raise ValueError("Unsupported state schema version.")
         if not self.run_name:
             raise ValueError("run_name must not be empty.")
@@ -113,6 +129,31 @@ class PipelineState:
             self,
             completed_phases=completed_phases,
             phase_artifacts=phase_artifacts,
+            selected_phase_outputs={
+                **self.selected_phase_outputs,
+                artifact.phase: artifact.output_data,
+            },
+            best_params={
+                **self.best_params,
+                artifact.phase: dict(artifact.output_data.get("best_params", {})),
+            },
+            metrics={
+                **self.metrics,
+                artifact.phase: {
+                    "macro_f1": float(artifact.output_data.get("metrics", {}).get("macro_f1", 0.0))
+                },
+            },
+            checkpoint_pointers={
+                **self.checkpoint_pointers,
+                **(
+                    {artifact.phase: artifact.output_data["checkpoint_pointer"]}
+                    if "checkpoint_pointer" in artifact.output_data
+                    else {}
+                ),
+            },
+            latest_checkpoint=artifact.output_data.get(
+                "checkpoint_pointer", self.latest_checkpoint
+            ),
             updated_at=_utc_now(),
         )
 
@@ -148,28 +189,78 @@ class PipelineStateStore:
 
     base_dir: Path
 
-    def run_dir(self, run_name: str) -> Path:
-        """Return the directory that stores one run."""
+    def phase_dir(self, phase: str) -> Path:
+        """Return the top-level directory for one phase."""
 
-        return self.base_dir / run_name
+        return self.base_dir / _phase_directory_name(phase)
 
-    def state_path(self, run_name: str) -> Path:
-        """Return the path of the state file for a run."""
+    def phase_runs_dir(self, phase: str) -> Path:
+        """Return the run directory root for one phase."""
 
-        return self.run_dir(run_name) / "state.json"
+        return self.phase_dir(phase) / "runs"
+
+    def run_dir(self, run_name: str, phase: str) -> Path:
+        """Return the directory that stores one run for one phase."""
+
+        return self.phase_runs_dir(phase) / run_name
+
+    def checkpoints_dir(self) -> Path:
+        """Return the directory for checkpoint metadata and pointers."""
+
+        return self.base_dir / "checkpoints"
+
+    def checkpoint_pointer_path(self, run_name: str) -> Path:
+        """Return checkpoint pointer metadata path for one run."""
+
+        return self.checkpoints_dir() / f"{run_name}.json"
+
+    def state_path(self, run_name: str, phase: str) -> Path:
+        """Return the path of the state file for a run and phase."""
+
+        return self.run_dir(run_name, phase) / "state.json"
 
     def phase_artifact_path(self, run_name: str, phase: str) -> Path:
-        """Return the artifact path for one phase."""
+        """Return the artifact path for one run and phase."""
 
-        return self.run_dir(run_name) / f"{phase}.json"
+        return self.run_dir(run_name, phase) / "artifact.json"
+
+    def _state_candidates(self, run_name: str) -> list[Path]:
+        """Return state file candidates from newest phase to oldest."""
+
+        return [self.state_path(run_name, phase) for phase in reversed(PHASE_ORDER)]
+
+    def _load_first_valid_state(self, paths: list[Path]) -> PipelineState | None:
+        """Load the first valid state from a list of candidate paths."""
+
+        for path in paths:
+            if not path.exists():
+                continue
+            try:
+                payload = _read_json(path)
+                return PipelineState.from_dict(payload)
+            except (json.JSONDecodeError, OSError, ValueError):
+                continue
+        return None
 
     def load(self, run_name: str) -> PipelineState:
-        """Load state from disk."""
+        """Load state from disk with corruption-tolerant fallback."""
 
-        state_path = self.state_path(run_name)
-        if not state_path.exists():
-            raise FileNotFoundError(state_path)
-        return PipelineState.from_dict(_read_json(state_path))
+        state = self._load_first_valid_state(self._state_candidates(run_name))
+        if state is not None:
+            return state
+
+        pointer_path = self.checkpoint_pointer_path(run_name)
+        if pointer_path.exists():
+            try:
+                pointer_payload = _read_json(pointer_path)
+                phase = pointer_payload["latest_phase"]
+                return PipelineState.from_dict(_read_json(self.state_path(run_name, phase)))
+            except (json.JSONDecodeError, OSError, KeyError, ValueError):
+                pass
+
+        raise FileNotFoundError(
+            f"No valid state found for run '{run_name}' under '{self.base_dir}'."
+        )
 
     def load_or_create(
         self,
@@ -189,9 +280,22 @@ class PipelineStateStore:
         return state
 
     def save(self, state: PipelineState) -> None:
-        """Persist state to disk."""
+        """Persist state snapshots and checkpoint pointer metadata."""
 
-        _atomic_write_json(self.state_path(state.run_name), state.to_dict())
+        latest_phase = state.completed_phases[-1] if state.completed_phases else "phase-1"
+        _atomic_write_json(self.state_path(state.run_name, latest_phase), state.to_dict())
+
+        _atomic_write_json(
+            self.checkpoint_pointer_path(state.run_name),
+            {
+                "schema_version": STATE_SCHEMA_VERSION,
+                "run_name": state.run_name,
+                "latest_phase": latest_phase,
+                "latest_checkpoint": state.latest_checkpoint,
+                "checkpoint_pointers": state.checkpoint_pointers,
+                "updated_at": state.updated_at,
+            },
+        )
 
     def save_artifact(self, state: PipelineState, artifact: PhaseArtifact) -> None:
         """Persist a phase artifact to disk."""

@@ -90,9 +90,15 @@ def test_run_command_executes_full_pipeline_and_writes_state(tmp_path: Path, cap
     payload = json.loads(capsys.readouterr().out)
     assert payload["completed_phases"] == list(PHASE_ORDER)
 
-    run_root = tmp_path / "runs" / "demo"
-    assert (run_root / "state.json").exists()
-    phase_two_payload = json.loads((run_root / "phase-2.json").read_text(encoding="utf-8"))
+    phase_one_state = tmp_path / "runs" / "phase_1" / "runs" / "demo" / "state.json"
+    phase_two_artifact = tmp_path / "runs" / "phase_2" / "runs" / "demo" / "artifact.json"
+    checkpoint_pointer = tmp_path / "runs" / "checkpoints" / "demo.json"
+
+    assert phase_one_state.exists()
+    assert phase_two_artifact.exists()
+    assert checkpoint_pointer.exists()
+
+    phase_two_payload = json.loads(phase_two_artifact.read_text(encoding="utf-8"))
     assert (
         phase_two_payload["input_data"]["upstream"]["phase-1"]["feature_pipeline"]["name"] == "mfcc"
     )

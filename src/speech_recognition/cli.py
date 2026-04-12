@@ -11,7 +11,7 @@ from typing import Any
 from .config import ConfigValidationError, ExperimentConfig, MLflowTrackingConfig
 from .orchestration import PipelineRunner, PipelineStateStore
 
-DEFAULT_OUTPUT_DIR = Path("outputs/pipeline_runs")
+DEFAULT_OUTPUT_DIR = Path("outputs")
 """Default directory for pipeline runs."""
 
 

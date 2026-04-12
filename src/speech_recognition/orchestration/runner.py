@@ -29,7 +29,7 @@ class PipelineRunner:
     def _run_root(self) -> Path:
         """Return the directory used for the active run."""
 
-        return self.store.run_dir(self.run_name)
+        return self.store.base_dir / self.run_name
 
     def load_state(self) -> PipelineState:
         """Load the persisted state or create a fresh one."""
