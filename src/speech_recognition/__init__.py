@@ -2,6 +2,20 @@
 
 import logging
 
+from .config import (
+    DEFAULT_SEEDS,
+    CheckpointConfig,
+    ConfigValidationError,
+    DatasetConfig,
+    ExperimentConfig,
+    FeaturePipelineConfig,
+    MLflowTrackingConfig,
+    ModelConfig,
+    OptimizerConfig,
+    PhaseSelectionConfig,
+    SchedulerConfig,
+    TrainingControlConfig,
+)
 from .dataset import Sample, SpeechCommandsDataset
 
 logging.basicConfig(
@@ -9,4 +23,19 @@ logging.basicConfig(
 )
 
 
-__all__ = ["Sample", "SpeechCommandsDataset"]
+__all__ = [
+    "DEFAULT_SEEDS",
+    "CheckpointConfig",
+    "ConfigValidationError",
+    "DatasetConfig",
+    "ExperimentConfig",
+    "FeaturePipelineConfig",
+    "MLflowTrackingConfig",
+    "ModelConfig",
+    "OptimizerConfig",
+    "PhaseSelectionConfig",
+    "Sample",
+    "SchedulerConfig",
+    "SpeechCommandsDataset",
+    "TrainingControlConfig",
+]
