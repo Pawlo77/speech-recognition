@@ -1,6 +1,5 @@
 """Unknown-class sample generation helpers for the dataset package."""
 
-import audioop
 import logging
 import math
 import random
@@ -11,6 +10,72 @@ from itertools import pairwise
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _require_pcm16(sample_width: int) -> None:
+    """Validate that operations run on 16-bit PCM data."""
+
+    if sample_width != 2:
+        raise ValueError("Only 16-bit PCM audio is supported.")
+
+
+def _frames_to_int16_samples(frames: bytes, sample_width: int) -> list[int]:
+    """Convert PCM16 frames into integer samples."""
+
+    _require_pcm16(sample_width)
+    samples = array("h")
+    samples.frombytes(frames[: len(frames) - (len(frames) % 2)])
+    return samples.tolist()
+
+
+def _int16_samples_to_frames(samples: list[int]) -> bytes:
+    """Convert integer samples into clipped PCM16 frames."""
+
+    clipped = array("h", [max(-32768, min(32767, sample)) for sample in samples])
+    return clipped.tobytes()
+
+
+def _pcm_avg(frames: bytes, sample_width: int) -> int:
+    """Return the integer mean sample value."""
+
+    samples = _frames_to_int16_samples(frames, sample_width)
+    if not samples:
+        return 0
+    return int(sum(samples) / len(samples))
+
+
+def _pcm_rms(frames: bytes, sample_width: int) -> int:
+    """Return RMS energy for PCM16 samples."""
+
+    samples = _frames_to_int16_samples(frames, sample_width)
+    if not samples:
+        return 0
+    mean_square = sum(sample * sample for sample in samples) / len(samples)
+    return round(math.sqrt(mean_square))
+
+
+def _pcm_bias(frames: bytes, sample_width: int, bias: int) -> bytes:
+    """Add a constant bias to all samples."""
+
+    samples = _frames_to_int16_samples(frames, sample_width)
+    return _int16_samples_to_frames([sample + bias for sample in samples])
+
+
+def _pcm_mul(frames: bytes, sample_width: int, factor: float) -> bytes:
+    """Scale PCM16 samples by a floating-point factor."""
+
+    samples = _frames_to_int16_samples(frames, sample_width)
+    return _int16_samples_to_frames([round(sample * factor) for sample in samples])
+
+
+def _pcm_add(left: bytes, right: bytes, sample_width: int) -> bytes:
+    """Add two PCM16 byte streams sample-wise."""
+
+    left_samples = _frames_to_int16_samples(left, sample_width)
+    right_samples = _frames_to_int16_samples(right, sample_width)
+    sample_count = min(len(left_samples), len(right_samples))
+    mixed = [left_samples[index] + right_samples[index] for index in range(sample_count)]
+    return _int16_samples_to_frames(mixed)
 
 
 class UnknownSampleGenerationMixin:
@@ -170,7 +235,7 @@ class UnknownSampleGenerationMixin:
                 if len(frames) < frame_size:
                     return b""
                 crops.append(frames)
-                rms_values.append(audioop.rms(frames, sample_width))
+                rms_values.append(_pcm_rms(frames, sample_width))
 
             if any(rms == 0 for rms in rms_values):
                 return b""
@@ -217,12 +282,12 @@ class UnknownSampleGenerationMixin:
                         continue
 
                     normalized_weight = raw_weights[source_index] / weight_sum
-                    scaled_slice = audioop.mul(
+                    scaled_slice = _pcm_mul(
                         source_slice,
                         sample_width,
                         0.98 * normalized_weight,
                     )
-                    mixed_slice = audioop.add(mixed_slice, scaled_slice, sample_width)
+                    mixed_slice = _pcm_add(mixed_slice, scaled_slice, sample_width)
 
                 dest_start_byte = slice_start * frame_size
                 dest_end_byte = dest_start_byte + len(mixed_slice)
@@ -267,13 +332,13 @@ class UnknownSampleGenerationMixin:
             return "unknown"
 
         window_size = max(1, int(sample_rate * 0.04))
-        min_rms = max(120, audioop.rms(frames, sample_width) // 3)
+        min_rms = max(120, _pcm_rms(frames, sample_width) // 3)
         pitch_estimates: list[float] = []
 
         for start in range(0, len(mono_samples) - window_size + 1, window_size // 2 or 1):
             window = mono_samples[start : start + window_size]
             window_frames = self._samples_to_frames(window)
-            if audioop.rms(window_frames, sample_width) < min_rms:
+            if _pcm_rms(window_frames, sample_width) < min_rms:
                 continue
 
             zero_crossings = 0
@@ -319,7 +384,7 @@ class UnknownSampleGenerationMixin:
             if not window:
                 continue
             windows.append(start)
-            window_rms.append(audioop.rms(self._samples_to_frames(window), sample_width))
+            window_rms.append(_pcm_rms(self._samples_to_frames(window), sample_width))
 
         if not window_rms:
             return 0.5
@@ -387,8 +452,8 @@ class UnknownSampleGenerationMixin:
         if not frames:
             return b""
 
-        centered_frames = audioop.bias(frames, sample_width, -audioop.avg(frames, sample_width))
-        current_rms = audioop.rms(centered_frames, sample_width)
+        centered_frames = _pcm_bias(frames, sample_width, -_pcm_avg(frames, sample_width))
+        current_rms = _pcm_rms(centered_frames, sample_width)
         if current_rms == 0:
             return b""
 
@@ -396,15 +461,15 @@ class UnknownSampleGenerationMixin:
         gain = min(1.15, max(0.85, gain))
         gain *= rng.uniform(0.96, 1.04)
 
-        conditioned_frames = audioop.mul(centered_frames, sample_width, gain)
+        conditioned_frames = _pcm_mul(centered_frames, sample_width, gain)
         frame_size = sample_width * channels
         delay_frames = rng.randint(max(1, int(sample_rate * 0.02)), max(1, int(sample_rate * 0.05)))
         delay_bytes = delay_frames * frame_size
         if len(conditioned_frames) > delay_bytes:
             echo_gain = rng.uniform(0.10, 0.18)
             dry = conditioned_frames
-            wet = audioop.mul(dry[:-delay_bytes], sample_width, echo_gain)
-            mixed_tail = audioop.add(dry[delay_bytes:], wet, sample_width)
+            wet = _pcm_mul(dry[:-delay_bytes], sample_width, echo_gain)
+            mixed_tail = _pcm_add(dry[delay_bytes:], wet, sample_width)
             conditioned_frames = dry[:delay_bytes] + mixed_tail
 
         return conditioned_frames
@@ -429,7 +494,7 @@ class UnknownSampleGenerationMixin:
             window = mono_samples[start : start + window_size]
             if not window:
                 continue
-            envelope.append(audioop.rms(self._samples_to_frames(window), sample_width))
+            envelope.append(_pcm_rms(self._samples_to_frames(window), sample_width))
 
         if len(envelope) < 4:
             return False

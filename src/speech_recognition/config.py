@@ -214,7 +214,7 @@ class ModelConfig:
     """Whether the model starts from pretrained weights."""
     stochastic_depth: float = 0.0
     """Stochastic depth probability."""
-    num_classes: int = 35
+    num_classes: int = 32
     """Number of output classes."""
 
     def __post_init__(self) -> None:
@@ -225,6 +225,7 @@ class ModelConfig:
         _require_fraction("dropout", self.dropout)
         _require_fraction("stochastic_depth", self.stochastic_depth)
         _require_int("num_classes", self.num_classes)
+        _require(self.num_classes == 32, "num_classes must be 32 for the Kaggle class set.")
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the model config."""
@@ -354,6 +355,8 @@ class TrainingControlConfig:
     """Optional gradient clipping threshold."""
     deterministic: bool = True
     """Enable deterministic execution where possible."""
+    use_mixed_precision: bool = False
+    """Enable mixed precision when the backend supports it."""
 
     def __post_init__(self) -> None:
         _require_int("epochs", self.epochs)
@@ -365,6 +368,7 @@ class TrainingControlConfig:
         _require_int("early_stopping_patience", self.early_stopping_patience, minimum=0)
         if self.max_grad_norm is not None:
             _require_float("max_grad_norm", self.max_grad_norm, minimum=0.0)
+        _require(isinstance(self.use_mixed_precision, bool), "use_mixed_precision must be a bool.")
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the training config."""

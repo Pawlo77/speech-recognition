@@ -1,11 +1,13 @@
 """Pipeline runner that persists state after every completed phase."""
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..config import ExperimentConfig
+from .performance import execute_with_profile
 from .services import PHASE_SERVICES, PipelineContext
 from .state import PHASE_ORDER, PhaseArtifact, PipelineState, PipelineStateStore
 
@@ -66,7 +68,10 @@ class PipelineRunner:
                 name: artifact.output_data for name, artifact in state.phase_artifacts.items()
             },
         }
-        output_data = service.execute(context)
+        phase_output, performance = execute_with_profile(lambda: service.execute(context))
+        if not isinstance(phase_output, Mapping):
+            raise ValueError(f"Phase '{phase}' must return a mapping payload.")
+        output_data = {**dict(phase_output), "performance": performance}
         artifact = PhaseArtifact(
             phase=phase,
             artifact_path=str(self.store.phase_artifact_path(self.run_name, phase)),

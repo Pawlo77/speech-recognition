@@ -3,7 +3,11 @@ ifneq ("$(wildcard .env)","")
 	export
 endif
 
-.PHONY: help install clean test pre-commit pre-commit-all
+export PYTHONPATH=.
+export PYTORCH_ENABLE_MPS_FALLBACK=1
+export OMP_NUM_THREADS=1
+
+.PHONY: help install clean test pre-commit pre-commit-all phase-1 phase-2 phase-3 phase-4 full-pipeline
 
 ############################
 # Repo Maintenance Targets #
@@ -17,6 +21,11 @@ help:
 	@echo "  make test                   - Run tests"
 	@echo "  make pre-commit             - Run pre-commit checks on changed files"
 	@echo "  make pre-commit-all         - Run pre-commit checks on all files"
+	@echo "  make phase-1                - Run phase 1 orchestration"
+	@echo "  make phase-2                - Run phase 2 orchestration"
+	@echo "  make phase-3                - Run phase 3 orchestration"
+	@echo "  make phase-4                - Run phase 4 orchestration"
+	@echo "  make full-pipeline          - Run the full pipeline"
 
 # install dependencies and pre-commit hooks
 install:
@@ -39,3 +48,18 @@ pre-commit:
 # pre-commit checks (linting, formatting, type checking)
 pre-commit-all:
 	uv run pre-commit run --all-files
+
+phase-1:
+	uv run speech-recognition phase-1 --output-dir outputs --run-name default
+
+phase-2:
+	uv run speech-recognition phase-2 --output-dir outputs --run-name default
+
+phase-3:
+	uv run speech-recognition phase-3 --output-dir outputs --run-name default
+
+phase-4:
+	uv run speech-recognition phase-4 --output-dir outputs --run-name default
+
+full-pipeline:
+	uv run speech-recognition run --output-dir outputs --run-name default

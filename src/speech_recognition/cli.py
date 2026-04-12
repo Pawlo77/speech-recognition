@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import ConfigValidationError, ExperimentConfig, MLflowTrackingConfig
-from .orchestration import PipelineRunner, PipelineStateStore
+from .orchestration import PipelineRunner, PipelineStateStore, build_mlflow_tracker
 
 DEFAULT_OUTPUT_DIR = Path("outputs")
 """Default directory for pipeline runs."""
@@ -142,6 +142,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_phase_command("status", "Show the current run state.", "status")
     add_phase_command("mlflow-ui", "Show or launch the MLflow UI.", "mlflow-ui")
     add_phase_command("run", "Run the full pipeline end to end.", "phase-4")
+    add_phase_command("run-single-train", argparse.SUPPRESS, "phase-3")
+    add_phase_command("run-single-eval", argparse.SUPPRESS, "phase-4")
     return parser
 
 
@@ -160,6 +162,10 @@ def _run_pipeline(command: str, runner: PipelineRunner) -> dict[str, Any]:
         return runner.execute_training().to_dict()
     if command == "eval":
         return runner.execute_evaluation().to_dict()
+    if command == "run-single-train":
+        return runner.execute_training().to_dict()
+    if command == "run-single-eval":
+        return runner.execute_evaluation().to_dict()
     if command == "status":
         return runner.load_state().to_dict()
     if command == "mlflow-ui":
@@ -167,6 +173,20 @@ def _run_pipeline(command: str, runner: PipelineRunner) -> dict[str, Any]:
         tracking = runner._effective_config(state).mlflow
         return _launch_or_report_mlflow_ui(tracking)
     raise ConfigValidationError(f"Unknown command '{command}'.")
+
+
+def _build_tracking_state(
+    command: str,
+    runner: PipelineRunner,
+) -> tuple[ExperimentConfig | None, bool]:
+    """Return the effective config and whether MLflow should track the command."""
+
+    if command in {"status", "mlflow-ui"}:
+        return None, False
+
+    state = runner.load_state()
+    effective_config = runner._effective_config(state)
+    return effective_config, effective_config.mlflow.enabled
 
 
 def _launch_or_report_mlflow_ui(tracking: MLflowTrackingConfig) -> dict[str, Any]:
@@ -206,7 +226,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             config = load_experiment_config(args.config, args.overrides)
         store = PipelineStateStore(args.output_dir)
         runner = PipelineRunner(store=store, config=config, run_name=args.run_name)
-        payload = _run_pipeline(args.command, runner)
+        tracker = None
+        effective_config, should_track = _build_tracking_state(args.command, runner)
+        if should_track and effective_config is not None:
+            tracker = build_mlflow_tracker(effective_config, run_name=args.run_name)
+            tracker.start()
+        try:
+            payload = _run_pipeline(args.command, runner)
+            if tracker is not None:
+                tracker.log_payload(payload)
+        finally:
+            if tracker is not None:
+                tracker.close()
     except (ConfigValidationError, FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
 

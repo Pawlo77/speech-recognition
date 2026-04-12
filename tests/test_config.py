@@ -38,6 +38,7 @@ def test_experiment_config_defaults_are_explicit() -> None:
         (lambda: DatasetConfig(train_split="invalid"), "train_split"),
         (lambda: FeaturePipelineConfig(name="mfcc", n_mfcc=0), "n_mfcc"),
         (lambda: ModelConfig(family="transformer"), "family"),
+        (lambda: ModelConfig(num_classes=35), "num_classes"),
         (lambda: OptimizerConfig(name="sgd"), "adamw"),
         (lambda: SchedulerConfig(warmup_epochs=60, total_epochs=60), "warmup_epochs"),
         (lambda: CheckpointConfig(save_best=False, save_last=False), "checkpoint"),
@@ -54,6 +55,7 @@ def test_experiment_config_round_trip_serializes_to_json() -> None:
     config = ExperimentConfig(
         features=FeaturePipelineConfig(name="mfcc", n_fft=1024, hop_length=160, n_mfcc=40),
         model=ModelConfig(family="xlstm", dropout=0.2, pretrained=False),
+        training=TrainingControlConfig(epochs=60, use_mixed_precision=True),
         phase=PhaseSelectionConfig(phase="phase_3"),
         checkpointing=CheckpointConfig(keep_last_n=3),
     )

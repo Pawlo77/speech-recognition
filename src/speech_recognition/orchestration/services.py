@@ -1,5 +1,8 @@
 """Deterministic phase services used by the pipeline runner."""
 
+import os
+import subprocess
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,6 +10,72 @@ from typing import Any
 
 from ..config import ExperimentConfig
 from .state import PHASE_ORDER, PhaseArtifact, PipelineState
+
+ISOLATED_CHILD_ENV: dict[str, str] = {
+    "PYTHONPATH": ".",
+    "PYTORCH_ENABLE_MPS_FALLBACK": "1",
+    "OMP_NUM_THREADS": "1",
+}
+"""Environment keys enforced for isolated child-process orchestration."""
+
+
+def build_isolated_subprocess_command(
+    command: str,
+    config_path: Path,
+    output_dir: Path,
+    run_name: str,
+) -> list[str]:
+    """Build a child-process CLI command for isolated phase execution."""
+
+    if command not in {"run-single-train", "run-single-eval"}:
+        raise ValueError(f"Unsupported isolated command '{command}'.")
+
+    return [
+        sys.executable,
+        "-m",
+        "speech_recognition.cli",
+        command,
+        "--config",
+        str(config_path),
+        "--output-dir",
+        str(output_dir),
+        "--run-name",
+        run_name,
+    ]
+
+
+def build_isolated_subprocess_env(base_env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Build environment variables for isolated child-process execution."""
+
+    env = dict(base_env or os.environ)
+    env.update(ISOLATED_CHILD_ENV)
+    return env
+
+
+def run_isolated_subprocess(
+    command: str,
+    config_path: Path,
+    output_dir: Path,
+    run_name: str,
+    *,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Run a child process using the isolated CLI invocation contract."""
+
+    invocation = build_isolated_subprocess_command(
+        command=command,
+        config_path=config_path,
+        output_dir=output_dir,
+        run_name=run_name,
+    )
+    env = build_isolated_subprocess_env()
+    return subprocess.run(  # noqa: S603
+        invocation,
+        check=check,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
 
 
 @dataclass(frozen=True, slots=True)

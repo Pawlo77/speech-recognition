@@ -96,7 +96,7 @@ class SpeechCommandsDataset(UnknownSampleGenerationMixin):
     def __init__(
         self,
         repo_root: str | Path | None = None,
-        data_dir_name: str = "data/kaggle_speech_commands",
+        data_dir_name: str = "../data/kaggle_speech_commands",
         val_ratio: float = 0.1,
         test_ratio: float = 0.1,
         unknown_label_samples_size: int = 10000,

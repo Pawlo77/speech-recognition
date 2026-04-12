@@ -9,6 +9,7 @@ requires-python = ">=3.12.4,<3.12.5"
 
 dependencies = [
     "dotenv>=0.9.9",
+    "fvcore>=0.1.5.post20221221",
     "ipykernel>=7.2.0",
     "ipywidgets>=8.1.8",
     "kagglehub>=0.3.6",

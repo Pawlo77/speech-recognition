@@ -7,19 +7,26 @@ from speech_recognition.cli import build_parser, load_experiment_config, main
 from speech_recognition.config import (
     ExperimentConfig,
     FeaturePipelineConfig,
+    MLflowTrackingConfig,
     SchedulerConfig,
     TrainingControlConfig,
 )
 from speech_recognition.orchestration.state import PHASE_ORDER
 
 
-def _configured_experiment() -> ExperimentConfig:
+def _configured_experiment(tracking_uri: str | None = None) -> ExperimentConfig:
     """Build a config with matching scheduler and training epochs for CLI tests."""
 
     training = TrainingControlConfig(epochs=12)
     scheduler = SchedulerConfig(total_epochs=12)
     features = FeaturePipelineConfig(name="mfcc")
-    return ExperimentConfig(features=features, training=training, scheduler=scheduler)
+    mlflow = MLflowTrackingConfig(tracking_uri=tracking_uri or "mlruns", run_name="demo")
+    return ExperimentConfig(
+        features=features,
+        training=training,
+        scheduler=scheduler,
+        mlflow=mlflow,
+    )
 
 
 def test_cli_help_lists_expected_commands(capsys) -> None:
@@ -43,6 +50,13 @@ def test_cli_help_lists_expected_commands(capsys) -> None:
         "run",
     ):
         assert command in stdout
+
+
+def test_cli_accepts_isolated_child_commands() -> None:
+    parser = build_parser()
+
+    assert parser.parse_args(["run-single-train"]).command == "run-single-train"
+    assert parser.parse_args(["run-single-eval"]).command == "run-single-eval"
 
 
 def test_cli_merges_config_file_and_cli_overrides(tmp_path: Path) -> None:
@@ -72,7 +86,10 @@ def test_cli_reports_invalid_override(capsys) -> None:
 
 def test_run_command_executes_full_pipeline_and_writes_state(tmp_path: Path, capsys) -> None:
     config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(_configured_experiment().to_dict()), encoding="utf-8")
+    config_path.write_text(
+        json.dumps(_configured_experiment(tracking_uri=str(tmp_path / "mlruns")).to_dict()),
+        encoding="utf-8",
+    )
 
     exit_code = main(
         [

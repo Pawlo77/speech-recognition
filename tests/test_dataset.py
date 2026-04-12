@@ -34,12 +34,12 @@ def test_dataset_local_path_detection() -> None:
     assert ds.dataset_root == expected_dataset_root
 
 
-def test_dataset_raises_if_missing_and_no_autodownload() -> None:
+def test_dataset_raises_if_missing_and_no_autodownload(tmp_path: Path) -> None:
     """
     Smoke test: class should fail clearly when data is missing and
     auto-download is disabled.
     """
-    fake_repo_root = Path(__file__).resolve().parents[1] / "_tmp_missing_dataset_root"
+    fake_repo_root = tmp_path / "missing_repo_root"
 
     try:
         SpeechCommandsDataset(repo_root=fake_repo_root, auto_download=False)
@@ -47,7 +47,7 @@ def test_dataset_raises_if_missing_and_no_autodownload() -> None:
         msg = str(exc)
         assert "Dataset not found" in msg
         expected_path = (
-            fake_repo_root / "data" / "kaggle_speech_commands" / SpeechCommandsDataset.KAGGLE_SLUG
+            fake_repo_root / "../data/kaggle_speech_commands" / SpeechCommandsDataset.KAGGLE_SLUG
         )
         assert str(expected_path) in msg
     else:

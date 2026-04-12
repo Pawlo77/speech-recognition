@@ -35,6 +35,19 @@ Use this checklist before reporting completion for any implementation task in th
 - Avoid `from __future__ import annotations` unless genuinely needed.
 - Keep dataclass and config validation errors explicit and user-facing.
 - Add or update tests whenever behavior changes.
+- Do not use dataclass auto-init for wrappers that own `nn.Module` submodules; initialize `nn.Module` first in an explicit `__init__`.
+
+## Optional Dependency Policy
+- Declare source libraries explicitly in code-level constants for each family/component.
+- Treat heavyweight libraries (`transformers`, `torchvision`, `timm`, `mamba-ssm`, `xlstm`) as optional at runtime unless guaranteed by project dependencies.
+- Provide deterministic fallback implementations when optional libraries are unavailable, especially on Apple Silicon/MPS.
+- Ensure fallback and primary paths expose the same interface and output shape contract.
+
+## Model Adapter Contract Checks
+- Enforce a shared adapter interface with `forward_pass`, `validate_input_shape`, and `profile_efficiency`.
+- Validate input tensors as `[B, 1, F, T]` and normalize temporal length via padding/truncation before forward.
+- Keep Kaggle class count explicit (`32`) and verify logits shape `(batch, 32)` in tests.
+- Run profiling with `fvcore` (`FlopCountAnalysis`, `parameter_count`) and verify integer outputs in tests.
 
 ## Completion Review Template
 Before final response, summarize:

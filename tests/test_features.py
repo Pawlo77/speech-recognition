@@ -14,6 +14,15 @@ from speech_recognition.features import (
 torch = pytest.importorskip("torch")
 torchaudio = pytest.importorskip("torchaudio")
 
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:At least one mel filterbank has all zero values.*:UserWarning"
+    ),
+    pytest.mark.filterwarnings(
+        "ignore:An output with one or more elements was resized.*:UserWarning"
+    ),
+]
+
 
 def _waveform(batch_size: int = 2, seconds: float = 1.0, sample_rate: int = 16000) -> torch.Tensor:
     num_samples = round(seconds * sample_rate)

@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,12 @@ from speech_recognition.config import (
     TrainingControlConfig,
 )
 from speech_recognition.orchestration.runner import PipelineRunner
-from speech_recognition.orchestration.services import PhaseThreeService
+from speech_recognition.orchestration.services import (
+    ISOLATED_CHILD_ENV,
+    PhaseThreeService,
+    build_isolated_subprocess_command,
+    build_isolated_subprocess_env,
+)
 from speech_recognition.orchestration.state import PHASE_ORDER, PipelineStateStore
 
 
@@ -56,3 +62,27 @@ def test_pipeline_resume_keeps_completed_phases_and_data_handoff(
         resumed_state.phase_artifacts["phase-4"].output_data["final_status"]
         == "ready-for-evaluation"
     )
+    assert resumed_state.phase_artifacts["phase-1"].output_data["performance"]["elapsed_ms"] >= 0
+
+
+def test_build_isolated_subprocess_command_uses_cli_contract(tmp_path: Path) -> None:
+    config_path = tmp_path / "trial.json"
+    command = build_isolated_subprocess_command(
+        command="run-single-train",
+        config_path=config_path,
+        output_dir=tmp_path / "outputs",
+        run_name="demo",
+    )
+
+    assert command[:3] == [sys.executable, "-m", "speech_recognition.cli"]
+    assert command[3] == "run-single-train"
+    assert "--config" in command
+    assert "--output-dir" in command
+    assert "--run-name" in command
+
+
+def test_build_isolated_subprocess_env_injects_required_keys() -> None:
+    env = build_isolated_subprocess_env({"PATH": "x"})
+
+    for key, value in ISOLATED_CHILD_ENV.items():
+        assert env[key] == value
