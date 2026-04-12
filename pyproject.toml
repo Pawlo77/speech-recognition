@@ -29,6 +29,9 @@ dev = [
     "ruff>=0.12.0",
 ]
 
+[project.scripts]
+speech-recognition = "speech_recognition.cli:main"
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 
