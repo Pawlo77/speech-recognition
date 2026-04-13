@@ -1,6 +1,7 @@
 """Orchestration utilities for resumable pipeline execution."""
 
 from .phase_one import PhaseOneSweepRunner, PhaseOneTrialSpec, build_phase_one_command
+from .phase_three import PhaseThreeSweepRunner, PhaseThreeTrialSpec, build_phase_three_command
 from .phase_two import PhaseTwoSweepRunner, PhaseTwoTrialSpec, build_phase_two_command
 from .runner import PipelineRunner
 from .services import (
@@ -27,6 +28,8 @@ __all__ = [
     "PhaseOneSweepRunner",
     "PhaseOneTrialSpec",
     "PhaseThreeService",
+    "PhaseThreeSweepRunner",
+    "PhaseThreeTrialSpec",
     "PhaseTwoService",
     "PhaseTwoSweepRunner",
     "PhaseTwoTrialSpec",
@@ -39,6 +42,7 @@ __all__ = [
     "build_isolated_subprocess_env",
     "build_mlflow_tracker",
     "build_phase_one_command",
+    "build_phase_three_command",
     "build_phase_two_command",
     "run_isolated_subprocess",
 ]

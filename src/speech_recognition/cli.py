@@ -11,6 +11,7 @@ from typing import Any
 from .config import ConfigValidationError, ExperimentConfig, MLflowTrackingConfig
 from .orchestration import PipelineRunner, PipelineStateStore, build_mlflow_tracker
 from .orchestration.phase_one import PhaseOneSweepRunner
+from .orchestration.phase_three import PhaseThreeSweepRunner
 from .orchestration.phase_two import PhaseTwoSweepRunner
 
 DEFAULT_OUTPUT_DIR = Path("outputs")
@@ -233,6 +234,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "phase-2":
             sweep_runner = PhaseTwoSweepRunner(args.output_dir, base_config=config)
+            payload = sweep_runner.execute()
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0
+        if args.command == "phase-3":
+            sweep_runner = PhaseThreeSweepRunner(args.output_dir, base_config=config)
             payload = sweep_runner.execute()
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 0

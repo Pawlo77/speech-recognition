@@ -59,6 +59,22 @@ def test_cli_accepts_isolated_child_commands() -> None:
     assert parser.parse_args(["run-single-eval"]).command == "run-single-eval"
 
 
+def test_phase_three_command_routes_to_sweep_runner(tmp_path: Path, monkeypatch) -> None:
+    class FakePhaseThreeRunner:
+        def __init__(self, output_dir, base_config=None) -> None:
+            self.output_dir = output_dir
+            self.base_config = base_config
+
+        def execute(self):
+            return {"phase": "phase-3", "output_dir": str(self.output_dir)}
+
+    monkeypatch.setattr("speech_recognition.cli.PhaseThreeSweepRunner", FakePhaseThreeRunner)
+
+    exit_code = main(["phase-3", "--output-dir", str(tmp_path / "runs")])
+
+    assert exit_code == 0
+
+
 def test_cli_merges_config_file_and_cli_overrides(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(_configured_experiment().to_dict()), encoding="utf-8")
