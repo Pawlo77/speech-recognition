@@ -27,8 +27,58 @@ PHASE_ONE_PROXY_MODELS: tuple[str, ...] = ("convnext", "xlstm")
 PHASE_ONE_SEEDS: tuple[int, int, int] = (0, 42, 2003)
 """Fixed seeds used for the phase-1 sweep grid."""
 
-PHASE_ONE_STATE_SCHEMA_VERSION = 1
+PHASE_ONE_STATE_SCHEMA_VERSION: int = 1
 """Schema version for the phase-1 sweep state file."""
+
+
+def _phase_one_group_key(record: "PhaseOneTrialRecord") -> tuple[str, str]:
+    """Return the grouping key that identifies one phase-1 configuration."""
+
+    return record.feature_name, record.proxy_model
+
+
+def _select_phase_one_winner(
+    records: Mapping[str, "PhaseOneTrialRecord"],
+) -> tuple[str | None, float | None, dict[str, Any] | None]:
+    """Select the phase-1 winner using mean macro-F1 over fixed seeds."""
+
+    if not records:
+        return None, None, None
+
+    grouped: dict[tuple[str, str], list[PhaseOneTrialRecord]] = {}
+    for record in records.values():
+        grouped.setdefault(_phase_one_group_key(record), []).append(record)
+
+    best_key: tuple[str, str] | None = None
+    best_mean = -1.0
+    best_records: list[PhaseOneTrialRecord] = []
+    for key, grouped_records in grouped.items():
+        mean_score = sum(item.validation_macro_f1 for item in grouped_records) / len(
+            grouped_records
+        )
+        if mean_score > best_mean:
+            best_key = key
+            best_mean = mean_score
+            best_records = grouped_records
+
+    if best_key is None or not best_records:
+        return None, None, None
+
+    representative = max(best_records, key=lambda item: item.validation_macro_f1)
+    aggregate = {
+        "feature_name": best_key[0],
+        "proxy_model": best_key[1],
+        "seed_count": len(best_records),
+        "mean_validation_macro_f1": best_mean,
+        "std_validation_macro_f1": (
+            (
+                sum((item.validation_macro_f1 - best_mean) ** 2 for item in best_records)
+                / len(best_records)
+            )
+            ** 0.5
+        ),
+    }
+    return representative.trial_id, best_mean, aggregate
 
 
 def _utc_now() -> str:
@@ -124,6 +174,21 @@ def _load_child_summary(child_state_path: Path) -> dict[str, Any]:
         return {}
 
 
+def _summary_from_completed_process(
+    child_state_path: Path, completed_process: subprocess.CompletedProcess[str]
+) -> dict[str, Any]:
+    """Load child summary from state file first, then subprocess JSON stdout."""
+
+    summary = _load_child_summary(child_state_path)
+    if summary:
+        return summary
+    try:
+        payload = json.loads(completed_process.stdout or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def build_phase_one_command(config_path: Path, run_name: str) -> list[str]:
     """Build the isolated subprocess command for one phase-1 trial."""
 
@@ -144,9 +209,13 @@ class PhaseOneTrialSpec:
     """Describe one trial in the phase-1 ablation grid."""
 
     trial_id: str
+    """Unique trial identifier."""
     feature_name: str
+    """Feature pipeline name for this trial."""
     proxy_model: str
+    """Proxy model family for this trial."""
     seed: int
+    """Random seed for this trial."""
 
     def to_config(self, base_config: ExperimentConfig) -> ExperimentConfig:
         """Return the concrete config for this trial."""
@@ -190,14 +259,23 @@ class PhaseOneTrialRecord:
     """Persisted record for one completed phase-1 trial."""
 
     trial_id: str
+    """Unique trial identifier."""
     feature_name: str
+    """Feature pipeline name for this trial."""
     proxy_model: str
+    """Proxy model family used in this trial."""
     seed: int
+    """Random seed used in this trial."""
     run_name: str
+    """Child pipeline run name."""
     config_path: str
+    """Path to the trial's experiment config file."""
     child_state_path: str
+    """Path to the child run's state file."""
     validation_macro_f1: float
+    """Validation macro-F1 score achieved."""
     completed_at: str
+    """ISO-8601 timestamp when trial completed."""
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the record."""
@@ -219,12 +297,19 @@ class PhaseOneSweepState:
     """Persistent state for the phase-1 sweep."""
 
     schema_version: int = PHASE_ONE_STATE_SCHEMA_VERSION
+    """State file schema version."""
     output_dir: str = ""
+    """Root output directory for the sweep."""
     completed_trials: dict[str, PhaseOneTrialRecord] = field(default_factory=dict)
+    """Mapping of trial ID to completed trial records."""
     best_trial_id: str | None = None
+    """Trial ID of the best-performing trial."""
     best_validation_macro_f1: float | None = None
+    """Best validation macro-F1 score achieved."""
     created_at: str = field(default_factory=_utc_now)
+    """ISO-8601 timestamp when sweep state was created."""
     updated_at: str = field(default_factory=_utc_now)
+    """ISO-8601 timestamp when sweep state was last updated."""
 
     def __post_init__(self) -> None:
         if self.schema_version != PHASE_ONE_STATE_SCHEMA_VERSION:
@@ -259,11 +344,16 @@ class PhaseOneSweepRunner:
     """Run the phase-1 feature ablation sweep using child processes."""
 
     def __init__(self, output_dir: Path, base_config: ExperimentConfig | None = None) -> None:
-        self.output_dir = output_dir
-        self.phase_dir = self.output_dir / "phase_1"
-        self.state_path = self.phase_dir / "state.json"
-        self.best_feature_path = self.phase_dir / "best_feature.json"
-        self.base_config = base_config or ExperimentConfig()
+        self.output_dir: Path = output_dir
+        """Root output directory for all sweep artifacts."""
+        self.phase_dir: Path = self.output_dir / "phase_1"
+        """Phase 1 subdirectory."""
+        self.state_path: Path = self.phase_dir / "state.json"
+        """Path to the persisted sweep state file."""
+        self.best_feature_path: Path = self.phase_dir / "best_feature.json"
+        """Path to the best feature summary file."""
+        self.base_config: ExperimentConfig = base_config or ExperimentConfig()
+        """Base experiment config used for all trials."""
 
     def load_state(self) -> PhaseOneSweepState:
         """Load the persisted sweep state or create a new one."""
@@ -278,11 +368,13 @@ class PhaseOneSweepRunner:
         _atomic_write_json(self.state_path, state.to_dict())
         if state.best_trial_id is not None:
             best_trial = state.completed_trials[state.best_trial_id]
+            _, _, aggregate = _select_phase_one_winner(state.completed_trials)
             _atomic_write_json(
                 self.best_feature_path,
                 {
                     "schema_version": PHASE_ONE_STATE_SCHEMA_VERSION,
                     "trial": best_trial.to_dict(),
+                    "aggregate": aggregate,
                 },
             )
 
@@ -316,7 +408,7 @@ class PhaseOneSweepRunner:
         )
 
         command = build_phase_one_command(config_path, self._trial_run_name(trial))
-        subprocess.run(  # noqa: S603
+        completed_process = subprocess.run(  # noqa: S603
             command,
             check=True,
             env=build_isolated_subprocess_env(),
@@ -324,7 +416,7 @@ class PhaseOneSweepRunner:
             capture_output=True,
         )
 
-        summary = _load_child_summary(child_state_path)
+        summary = _summary_from_completed_process(child_state_path, completed_process)
         validation_macro_f1 = _trial_score(summary)
         return PhaseOneTrialRecord(
             trial_id=trial.trial_id,
@@ -342,51 +434,29 @@ class PhaseOneSweepRunner:
         """Run the full phase-1 sweep, skipping completed trials."""
 
         state = self.load_state()
-        best_trial_id = state.best_trial_id
-        best_score = (
-            state.best_validation_macro_f1 if state.best_validation_macro_f1 is not None else -1.0
-        )
+        best_trial_id, best_score, aggregate = _select_phase_one_winner(state.completed_trials)
 
         for trial in build_phase_one_trials():
             if trial.trial_id in state.completed_trials:
-                existing = state.completed_trials[trial.trial_id]
-                if existing.validation_macro_f1 >= best_score:
-                    best_trial_id = trial.trial_id
-                    best_score = existing.validation_macro_f1
                 continue
 
             trial_record = self._run_trial(trial)
+            completed_trials = {**state.completed_trials, trial.trial_id: trial_record}
+            best_trial_id, best_score, aggregate = _select_phase_one_winner(completed_trials)
             state = PhaseOneSweepState(
                 schema_version=state.schema_version,
                 output_dir=state.output_dir,
-                completed_trials={**state.completed_trials, trial.trial_id: trial_record},
+                completed_trials=completed_trials,
                 best_trial_id=best_trial_id,
-                best_validation_macro_f1=best_score if best_score >= 0.0 else None,
+                best_validation_macro_f1=best_score,
                 created_at=state.created_at,
                 updated_at=_utc_now(),
             )
 
-            if trial_record.validation_macro_f1 >= best_score:
-                best_trial_id = trial.trial_id
-                best_score = trial_record.validation_macro_f1
-
-            state = PhaseOneSweepState(
-                schema_version=state.schema_version,
-                output_dir=state.output_dir,
-                completed_trials=state.completed_trials,
-                best_trial_id=best_trial_id,
-                best_validation_macro_f1=best_score if best_score >= 0.0 else None,
-                created_at=state.created_at,
-                updated_at=trial_record.completed_at,
-            )
             self._save_state(state)
 
-        if best_trial_id is None and state.completed_trials:
-            best_trial = max(
-                state.completed_trials.values(), key=lambda record: record.validation_macro_f1
-            )
-            best_trial_id = best_trial.trial_id
-            best_score = best_trial.validation_macro_f1
+        if state.completed_trials:
+            best_trial_id, best_score, aggregate = _select_phase_one_winner(state.completed_trials)
             state = PhaseOneSweepState(
                 schema_version=state.schema_version,
                 output_dir=state.output_dir,
@@ -405,7 +475,8 @@ class PhaseOneSweepRunner:
             "best_trial": state.completed_trials[best_trial_id].to_dict()
             if best_trial_id
             else None,
-            "best_validation_macro_f1": best_score if best_score >= 0.0 else None,
+            "best_validation_macro_f1": best_score,
+            "best_aggregate": aggregate,
             "state_path": str(self.state_path),
             "best_feature_path": str(self.best_feature_path),
         }

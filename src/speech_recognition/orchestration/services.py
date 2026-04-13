@@ -83,9 +83,13 @@ class PipelineContext:
     """Provide config, state, and upstream artifacts to a phase service."""
 
     config: ExperimentConfig
+    """Experiment configuration for this pipeline run."""
     run_name: str
+    """Name identifier for this pipeline run."""
     run_root: Path
+    """Root directory where run artifacts are stored."""
     state: PipelineState
+    """Current persistence state of the pipeline."""
 
     @property
     def upstream_artifacts(self) -> Mapping[str, PhaseArtifact]:
@@ -99,7 +103,9 @@ class PhaseService:
     """Base class for deterministic phase services."""
 
     phase: str
+    """Canonical phase identifier (e.g., phase-1)."""
     dependencies: tuple[str, ...]
+    """Tuple of upstream phase names this service depends on."""
 
     def execute(self, context: PipelineContext) -> dict[str, Any]:
         """Execute the phase and return a JSON-serializable payload."""

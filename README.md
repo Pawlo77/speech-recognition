@@ -10,7 +10,7 @@ This repository implements a controlled keyword-spotting pipeline for the Kaggle
 
 ## Methodological Blueprint
 
-The project follows the four-phase plan documented in [report/report.tex](report/report.tex):
+The project follows the four-phase plan documented in [outputs/report/report.tex](outputs/report/report.tex):
 
 1. Phase 1: feature strategy ablation on `train_small` and `valid_small`.
 2. Phase 2: global hyperparameter tuning.
@@ -117,14 +117,8 @@ make full-pipeline
 
 ## MLflow
 
-Local MLflow runs are stored under `.mlruns/` by default. Launch the UI with:
+Local MLflow runs are stored under `mlruns/` by default. Launch the UI with:
 
 ```bash
-mlflow ui --backend-store-uri .mlruns
-```
-
-For the CLI wrapper, use:
-
-```bash
-speech-recognition mlflow-ui
+make mlflow
 ```

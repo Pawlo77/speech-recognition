@@ -58,7 +58,7 @@ def test_readme_shell_code_blocks_use_valid_commands() -> None:
         "make phase-3",
         "make phase-4",
         "make full-pipeline",
-        "mlflow ui --backend-store-uri .mlruns",
+        "mlflow ui --backend-store-uri mlruns",
         "speech-recognition mlflow-ui",
     ]
     for command in expected_commands:

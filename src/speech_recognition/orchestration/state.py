@@ -12,7 +12,7 @@ from ..config import ExperimentConfig
 PHASE_ORDER: tuple[str, ...] = ("phase-1", "phase-2", "phase-3", "phase-4")
 """Canonical execution order for the pipeline."""
 
-STATE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION: int = 1
 """Current schema version for persisted pipeline state."""
 
 
@@ -64,10 +64,15 @@ class PhaseArtifact:
     """Serialized output for one completed phase."""
 
     phase: str
+    """Phase identifier (e.g., phase-1)."""
     artifact_path: str
+    """Path where this artifact was persisted."""
     input_data: dict[str, Any]
+    """Input data provided to the phase."""
     output_data: dict[str, Any]
+    """Output payload produced by the phase."""
     depends_on: tuple[str, ...] = ()
+    """Upstream phase dependencies."""
 
     def __post_init__(self) -> None:
         if self.phase not in PHASE_ORDER:
@@ -95,18 +100,31 @@ class PipelineState:
     """Persistent run state for the full pipeline."""
 
     schema_version: int = STATE_SCHEMA_VERSION
+    """State file schema version."""
     run_name: str = "default"
+    """Name identifier for this pipeline run."""
     run_root: str = ""
+    """Root directory where run artifacts are stored."""
     config: dict[str, Any] = field(default_factory=dict)
+    """Serialized experiment configuration."""
     completed_phases: tuple[str, ...] = ()
+    """Tuple of completed phase names in execution order."""
     phase_artifacts: dict[str, PhaseArtifact] = field(default_factory=dict)
+    """Completed phase artifacts keyed by phase name."""
     best_params: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Best hyperparameters per phase."""
     metrics: dict[str, dict[str, float]] = field(default_factory=dict)
+    """Best metrics per phase."""
     selected_phase_outputs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Selected outputs from each phase."""
     checkpoint_pointers: dict[str, str] = field(default_factory=dict)
+    """Checkpoint file paths per phase."""
     latest_checkpoint: str | None = None
+    """Path to the most recent checkpoint."""
     created_at: str = field(default_factory=_utc_now)
+    """ISO-8601 timestamp when state was created."""
     updated_at: str = field(default_factory=_utc_now)
+    """ISO-8601 timestamp when state was last updated."""
 
     def __post_init__(self) -> None:
         if self.schema_version != STATE_SCHEMA_VERSION:
@@ -188,6 +206,7 @@ class PipelineStateStore:
     """Manage persistent run state and phase artifacts on disk."""
 
     base_dir: Path
+    """Root directory for all run state and artifacts."""
 
     def phase_dir(self, phase: str) -> Path:
         """Return the top-level directory for one phase."""

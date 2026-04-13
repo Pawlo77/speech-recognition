@@ -222,6 +222,24 @@ class ModelConfig:
     """Whether the model starts from pretrained weights."""
     stochastic_depth: float = 0.0
     """Stochastic depth probability."""
+    ast_head: str = "linear"
+    """AST classification head type (linear or mlp_256)."""
+    ast_positional_embedding: str = "interp"
+    """AST positional embedding mode (interp or learned)."""
+    ssamba_pooling: str = "mean"
+    """SSAMBA pooling mode (mean or max)."""
+    ssamba_use_cls: bool = True
+    """Whether SSAMBA uses a CLS token path."""
+    ssamba_stride_ms: int = 10
+    """SSAMBA temporal stride in milliseconds (10 or 5)."""
+    xlstm_dim: int = 32
+    """xLSTM hidden/memory dimension."""
+    xlstm_state_reset: bool = True
+    """Whether xLSTM state resets between utterances."""
+    xlstm_output_mode: str = "final"
+    """xLSTM output reduction mode (final or mean)."""
+    mlp_head_l2_norm: bool = True
+    """Enable L2-normalized MLP-Mixer head logits."""
     num_classes: int = 32
     """Number of output classes."""
 
@@ -232,8 +250,23 @@ class ModelConfig:
         )
         _require_fraction("dropout", self.dropout)
         _require_fraction("stochastic_depth", self.stochastic_depth)
+        _require(self.ast_head in {"linear", "mlp_256"}, "ast_head must be 'linear' or 'mlp_256'.")
+        _require(
+            self.ast_positional_embedding in {"interp", "learned"},
+            "ast_positional_embedding must be 'interp' or 'learned'.",
+        )
+        _require(self.ssamba_pooling in {"mean", "max"}, "ssamba_pooling must be 'mean' or 'max'.")
+        _require(self.ssamba_stride_ms in {5, 10}, "ssamba_stride_ms must be 5 or 10.")
+        _require(self.xlstm_dim in {32, 64}, "xlstm_dim must be 32 or 64.")
+        _require(
+            self.xlstm_output_mode in {"final", "mean"},
+            "xlstm_output_mode must be 'final' or 'mean'.",
+        )
         _require_int("num_classes", self.num_classes)
-        _require(self.num_classes == 32, "num_classes must be 32 for the Kaggle class set.")
+        _require(
+            2 <= self.num_classes <= 32,
+            "num_classes must be between 2 and 32.",
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the model config."""

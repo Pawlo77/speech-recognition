@@ -23,9 +23,13 @@ class ReproducibilityReport:
     """Minimal environment snapshot stored alongside each MLflow run."""
 
     processor: str
+    """Processor architecture string."""
     torch_version: str
+    """PyTorch version string."""
     git_commit_hash: str
+    """Current git commit hash."""
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    """ISO-8601 timestamp when report was created."""
 
     def to_dict(self) -> dict[str, str]:
         """Return a JSON-serializable representation of the report."""
@@ -113,11 +117,17 @@ class MlflowRunTracker:
     """Track a single run with MLflow while tolerating offline/local-only setups."""
 
     tracking: MLflowTrackingConfig
+    """MLflow tracking configuration."""
     experiment_config: ExperimentConfig
+    """Experiment configuration being tracked."""
     model_adapter: Any
+    """Model adapter for efficiency profiling."""
     run_name: str
+    """Name identifier for this MLflow run."""
     _mlflow: Any = field(default=None, init=False, repr=False)
+    """MLflow module reference (lazy-loaded)."""
     _run_active: bool = field(default=False, init=False, repr=False)
+    """Whether MLflow run is currently active."""
 
     def start(self) -> None:
         """Start a run and log static hyperparameters and efficiency metrics."""
@@ -270,6 +280,7 @@ def build_mlflow_tracker(experiment_config: ExperimentConfig, run_name: str) -> 
         family=experiment_config.model.family,
         num_classes=experiment_config.model.num_classes,
         pretrained=experiment_config.model.pretrained,
+        model_config=experiment_config.model,
     )
     return MlflowRunTracker(
         tracking=experiment_config.mlflow,

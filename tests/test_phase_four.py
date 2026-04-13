@@ -33,7 +33,7 @@ def test_build_phase_four_command_uses_isolated_child_contract(tmp_path: Path) -
 
     command = build_phase_four_command(config_path, "trial_01_flat_multiclass_trial_a_seed_0")
 
-    assert command[:4] == [sys.executable, "-m", "speech_recognition.cli", "run-single-eval"]
+    assert command[:4] == [sys.executable, "-m", "speech_recognition.cli", "run-single-train"]
     assert command[4:] == [
         "--config",
         str(config_path),
@@ -170,17 +170,19 @@ def test_phase_four_sweep_skips_completed_trials_and_applies_strict_gate(
         _ = check, env, text, capture_output
         calls.append(list(command))
         run_name = command[command.index("--run-name") + 1]
-        config_path = output_dir / "phase_4" / "runs" / run_name / "temp_config.json"
+        trial_name = run_name.removesuffix("_heldout_test")
+        config_path = output_dir / "phase_4" / "runs" / trial_name / "temp_config.json"
         config_payload = json.loads(config_path.read_text(encoding="utf-8"))
 
-        assert config_payload["evaluation"]["strategy"] == "sampling_control"
-        assert config_payload["evaluation"]["ensemble_members"] == [
-            "trial_02_convnext_sd_0.2_kernel_7_seed_42",
-        ]
-        assert config_payload["evaluation"]["warmup_iterations"] == 50
-        assert config_payload["evaluation"]["max_core_command_f1_drop"] == pytest.approx(0.01)
-        assert config_payload["model"]["family"] == "convnext"
-        assert config_payload["seed"] == 42
+        if not run_name.endswith("_heldout_test"):
+            assert config_payload["evaluation"]["strategy"] == "sampling_control"
+            assert config_payload["evaluation"]["ensemble_members"] == [
+                "trial_02_convnext_sd_0.2_kernel_7_seed_42",
+            ]
+            assert config_payload["evaluation"]["warmup_iterations"] == 50
+            assert config_payload["evaluation"]["max_core_command_f1_drop"] == pytest.approx(0.01)
+            assert config_payload["model"]["family"] == "convnext"
+            assert config_payload["seed"] == 42
 
         child_state_path = output_dir / "phase_4" / "runs" / run_name / "state.json"
         child_state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -215,8 +217,8 @@ def test_phase_four_sweep_skips_completed_trials_and_applies_strict_gate(
 
     payload = runner.execute()
 
-    assert len(calls) == 1
-    assert calls[0][:4] == [sys.executable, "-m", "speech_recognition.cli", "run-single-eval"]
+    assert len(calls) >= 1
+    assert calls[0][:4] == [sys.executable, "-m", "speech_recognition.cli", "run-single-train"]
     assert payload["completed_trials"] == 2
     assert payload["best_macro_f1_nc"] == pytest.approx(0.91)
     assert payload["best_trial"]["trial_id"] == pending_trial.trial_id

@@ -24,11 +24,17 @@ class TrainingCheckpoint:
     """Serializable checkpoint payload for exact training resumption."""
 
     model_state_dict: dict[str, Any]
+    """Model parameter state dictionary."""
     optimizer_state_dict: dict[str, Any]
+    """Optimizer state dictionary."""
     scheduler_state_dict: dict[str, Any] | None
+    """Scheduler state dictionary or None if no scheduler."""
     rng_state: dict[str, Any]
+    """Random number generator states for Python, NumPy, and PyTorch."""
     epoch: int
+    """Epoch number when checkpoint was saved."""
     step: int
+    """Total training step number when checkpoint was saved."""
 
     def to_dict(self) -> dict[str, Any]:
         """Return a plain dictionary suitable for torch.save."""
@@ -61,13 +67,21 @@ class TrainingEngine:
     """Train and resume a model on MPS when available, otherwise on CPU."""
 
     model: nn.Module
+    """PyTorch model to train."""
     optimizer: torch.optim.Optimizer
+    """Optimizer for updating model parameters."""
     scheduler: Any
+    """Learning rate scheduler or None."""
     training_config: TrainingControlConfig
+    """Training hyperparameter configuration."""
     checkpoint_dir: Path
+    """Directory for storing training checkpoints."""
     device: torch.device = field(default_factory=lambda: select_training_device())
+    """Device for training (MPS, CUDA, or CPU)."""
     use_mixed_precision: bool | None = None
-    loss_fn: nn.Module = field(default_factory=nn.CrossEntropyLoss, init=False)
+    """Whether to use mixed precision training (None = use config value)."""
+    loss_fn: nn.Module = field(default_factory=nn.CrossEntropyLoss)
+    """Loss function for training."""
 
     def __post_init__(self) -> None:
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)

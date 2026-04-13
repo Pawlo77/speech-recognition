@@ -80,4 +80,4 @@ full-pipeline:
 
 # Launch MLflow UI for local runs
 mlflow:
-	uv run mlflow ui --backend-store-uri .mlruns
+	uv run mlflow ui --backend-store-uri mlruns

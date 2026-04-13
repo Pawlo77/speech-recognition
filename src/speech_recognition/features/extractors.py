@@ -13,9 +13,10 @@ from torch import Tensor, nn
 from ..config import FeaturePipelineConfig
 
 DEFAULT_SAMPLE_RATE: Final[int] = 16000
-# Default audio sample rate used by waveform loading and feature transforms.
+"""Default audio sample rate used by waveform loading and feature transforms."""
+
 DEFAULT_TARGET_SECONDS: Final[float] = 1.0
-# Default clip duration used for padding/trimming waveforms.
+"""Default clip duration used for padding/trimming waveforms."""
 
 
 class DynamicWaveformPad(nn.Module):

@@ -14,29 +14,89 @@ from .phase_one import _atomic_write_json, _feature_pipeline_for_trial, _read_js
 from .phase_two import _phase_two_feature_config, _scheduler_config_for_trial
 from .services import build_isolated_subprocess_env
 
-PHASE_THREE_STATE_SCHEMA_VERSION = 1
+PHASE_THREE_STATE_SCHEMA_VERSION: int = 1
 """Schema version for the phase-3 sweep state file."""
 
 PHASE_THREE_SEEDS: tuple[int, int, int] = DEFAULT_SEEDS
 """Fixed seeds used for the phase-3 sweep grid."""
 
 PHASE_THREE_AST_DROPOUTS: tuple[float, float] = (0.1, 0.5)
+"""AST dropout probability values to sweep."""
+
 PHASE_THREE_AST_HEADS: tuple[str, str] = ("linear", "mlp_256")
+"""AST classification head types to sweep."""
+
 PHASE_THREE_AST_POSITIONAL_EMBEDDINGS: tuple[str, str] = ("interp", "learned")
+"""AST positional embedding modes to sweep."""
 
 PHASE_THREE_CONVNEXT_STOCH_DEPTHS: tuple[float, float] = (0.0, 0.2)
+"""ConvNeXt stochastic depth values to sweep."""
+
 PHASE_THREE_CONVNEXT_KERNEL_SIZES: tuple[int, ...] = (7,)
+"""ConvNeXt kernel sizes to sweep."""
 
 PHASE_THREE_SSAMBA_POOLINGS: tuple[str, str] = ("mean", "max")
+"""SSAMBA pooling modes to sweep."""
+
 PHASE_THREE_SSAMBA_CLS: tuple[bool, bool] = (True, False)
+"""SSAMBA CLS token configurations to sweep."""
+
 PHASE_THREE_SSAMBA_STRIDES_MS: tuple[int, int] = (10, 5)
+"""SSAMBA temporal stride values (ms) to sweep."""
 
 PHASE_THREE_XLSTM_DIMS: tuple[int, int] = (32, 64)
+"""xLSTM hidden/memory dimensions to sweep."""
+
 PHASE_THREE_XLSTM_STATE_RESETS: tuple[bool, bool] = (True, False)
+"""xLSTM state reset configurations to sweep."""
+
 PHASE_THREE_XLSTM_OUTPUTS: tuple[str, str] = ("final", "mean")
+"""xLSTM output reduction modes to sweep."""
 
 PHASE_THREE_MLP_MIXER_DROPOUTS: tuple[float, float] = (0.0, 0.2)
+"""MLP-Mixer dropout probability values to sweep."""
+
 PHASE_THREE_MLP_MIXER_HEAD_L2_NORM: tuple[bool, bool] = (True, False)
+"""MLP-Mixer L2-normalized head configurations to sweep."""
+
+
+def _phase_three_group_key(record: "PhaseThreeTrialRecord") -> tuple[str, str]:
+    """Return the grouping key that identifies one phase-3 architecture config."""
+
+    return record.family, json.dumps(record.architecture_params, sort_keys=True)
+
+
+def _phase_three_group_stats(
+    records: Mapping[str, "PhaseThreeTrialRecord"],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Compute per-configuration aggregate statistics over seed runs."""
+
+    grouped: dict[tuple[str, str], list[PhaseThreeTrialRecord]] = {}
+    for record in records.values():
+        grouped.setdefault(_phase_three_group_key(record), []).append(record)
+
+    stats: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, grouped_records in grouped.items():
+        mean_score = sum(item.validation_macro_f1 for item in grouped_records) / len(
+            grouped_records
+        )
+        representative = max(grouped_records, key=lambda item: item.validation_macro_f1)
+        stats[key] = {
+            "family": key[0],
+            "architecture_params": representative.architecture_params,
+            "seed_count": len(grouped_records),
+            "mean_validation_macro_f1": mean_score,
+            "std_validation_macro_f1": (
+                (
+                    sum((item.validation_macro_f1 - mean_score) ** 2 for item in grouped_records)
+                    / len(grouped_records)
+                )
+                ** 0.5
+            ),
+            "representative_trial_id": representative.trial_id,
+            "representative_score": representative.validation_macro_f1,
+        }
+    return stats
 
 
 def _utc_now() -> str:
@@ -71,6 +131,53 @@ def _phase_three_score(payload: Mapping[str, Any]) -> float:
                     if score > 0.0:
                         return score
     return 0.0
+
+
+def _phase_three_core_command_score(payload: Mapping[str, Any]) -> float | None:
+    """Extract core-command macro-F1 from a child payload when available."""
+
+    if not isinstance(payload, Mapping):
+        return None
+
+    direct = payload.get("core_command_macro_f1")
+    if isinstance(direct, int | float):
+        return float(direct)
+
+    metrics = payload.get("metrics")
+    if isinstance(metrics, Mapping):
+        metric_value = metrics.get("core_command_macro_f1")
+        if isinstance(metric_value, int | float):
+            return float(metric_value)
+
+    phase_artifacts = payload.get("phase_artifacts")
+    if isinstance(phase_artifacts, Mapping):
+        for artifact in phase_artifacts.values():
+            if isinstance(artifact, Mapping):
+                output_data = artifact.get("output_data")
+                if isinstance(output_data, Mapping):
+                    score = _phase_three_core_command_score(output_data)
+                    if score is not None:
+                        return score
+    return None
+
+
+def _summary_from_completed_process(
+    child_state_path: Path, completed_process: subprocess.CompletedProcess[str]
+) -> dict[str, Any]:
+    """Load child summary from state file first, then subprocess JSON stdout."""
+
+    if child_state_path.exists():
+        try:
+            payload = _read_json(child_state_path)
+            if isinstance(payload, dict):
+                return payload
+        except (json.JSONDecodeError, OSError):
+            pass
+    try:
+        payload = json.loads(completed_process.stdout or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _phase_three_trial_metadata(trial: Mapping[str, Any]) -> dict[str, Any]:
@@ -173,6 +280,8 @@ class PhaseThreeTrialSpec:
                 family=family,
                 pretrained=False,
                 dropout=float(params["dropout"]),
+                ast_head=str(params["head"]),
+                ast_positional_embedding=str(params["positional_embedding"]),
             )
         if family == "convnext":
             return replace(
@@ -182,11 +291,31 @@ class PhaseThreeTrialSpec:
                 stochastic_depth=float(params["stochastic_depth"]),
             )
         if family == "ssamba":
-            return replace(base_model, family=family, pretrained=False)
+            return replace(
+                base_model,
+                family=family,
+                pretrained=False,
+                ssamba_pooling=str(params["pooling"]),
+                ssamba_use_cls=bool(params["use_cls"]),
+                ssamba_stride_ms=int(params["stride_ms"]),
+            )
         if family == "xlstm":
-            return replace(base_model, family=family, pretrained=False)
+            return replace(
+                base_model,
+                family=family,
+                pretrained=False,
+                xlstm_dim=int(params["dimension"]),
+                xlstm_state_reset=bool(params["state_reset"]),
+                xlstm_output_mode=str(params["output_mode"]),
+            )
         if family == "mlp_mixer":
-            return replace(base_model, family=family, pretrained=False)
+            return replace(
+                base_model,
+                family=family,
+                pretrained=False,
+                dropout=float(params["dropout"]),
+                mlp_head_l2_norm=bool(params["head_l2_norm"]),
+            )
         raise ValueError(f"Unsupported phase-3 model family '{family}'.")
 
 
@@ -333,14 +462,25 @@ class PhaseThreeTrialRecord:
     """Persisted record for one completed phase-3 trial."""
 
     trial_id: str
+    """Unique trial identifier."""
     family: str
+    """Model family name."""
     seed: int
+    """Random seed used."""
     architecture_params: dict[str, Any]
+    """Architecture hyperparameters used."""
     run_name: str
+    """Child pipeline run name."""
     config_path: str
+    """Path to the trial's config file."""
     child_state_path: str
+    """Path to the child run's state."""
     validation_macro_f1: float
+    """Validation macro-F1 score achieved."""
     completed_at: str
+    """ISO-8601 timestamp when completed."""
+    core_command_macro_f1: float | None = None
+    """Core-command macro-F1 score when present in child metrics."""
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the record."""
@@ -354,6 +494,8 @@ class PhaseThreeTrialRecord:
         payload = dict(data)
         payload["seed"] = int(payload["seed"])
         payload["validation_macro_f1"] = float(payload["validation_macro_f1"])
+        if payload.get("core_command_macro_f1") is not None:
+            payload["core_command_macro_f1"] = float(payload["core_command_macro_f1"])
         return cls(**payload)
 
 
@@ -449,11 +591,20 @@ class PhaseThreeSweepRunner:
         _atomic_write_json(self.state_path, state.to_dict())
         if state.best_trial_id is not None:
             best_trial = state.completed_trials[state.best_trial_id]
+            grouped_stats = _phase_three_group_stats(state.completed_trials)
             _atomic_write_json(
                 self.best_backbones_path,
                 {
                     "schema_version": PHASE_THREE_STATE_SCHEMA_VERSION,
                     "best_trial": best_trial.to_dict(),
+                    "best_aggregate": next(
+                        (
+                            payload
+                            for payload in grouped_stats.values()
+                            if payload["representative_trial_id"] == state.best_trial_id
+                        ),
+                        None,
+                    ),
                     "top_three_trials": [
                         state.completed_trials[trial_id].to_dict()
                         for trial_id in state.top_three_trial_ids
@@ -507,7 +658,7 @@ class PhaseThreeSweepRunner:
         )
 
         command = build_phase_three_command(config_path, self._trial_run_name(trial))
-        subprocess.run(  # noqa: S603
+        completed_process = subprocess.run(  # noqa: S603
             command,
             check=True,
             env=build_isolated_subprocess_env(),
@@ -515,8 +666,9 @@ class PhaseThreeSweepRunner:
             capture_output=True,
         )
 
-        summary = _read_json(child_state_path) if child_state_path.exists() else {}
+        summary = _summary_from_completed_process(child_state_path, completed_process)
         validation_macro_f1 = _phase_three_score(summary)
+        core_command_macro_f1 = _phase_three_core_command_score(summary)
         return PhaseThreeTrialRecord(
             trial_id=trial.trial_id,
             family=trial.family,
@@ -526,6 +678,7 @@ class PhaseThreeSweepRunner:
             config_path=str(config_path),
             child_state_path=str(child_state_path),
             validation_macro_f1=validation_macro_f1,
+            core_command_macro_f1=core_command_macro_f1,
             completed_at=_utc_now(),
         )
 
@@ -535,20 +688,25 @@ class PhaseThreeSweepRunner:
         if not records:
             return None, (), {}
 
-        sorted_records = sorted(
-            records.values(), key=lambda record: record.validation_macro_f1, reverse=True
+        grouped_stats = _phase_three_group_stats(records)
+        sorted_groups = sorted(
+            grouped_stats.values(),
+            key=lambda payload: payload["mean_validation_macro_f1"],
+            reverse=True,
         )
-        best_trial_id = sorted_records[0].trial_id
-        top_three_trial_ids = tuple(record.trial_id for record in sorted_records[:3])
+        best_trial_id = str(sorted_groups[0]["representative_trial_id"])
+        top_three_trial_ids = tuple(
+            str(payload["representative_trial_id"]) for payload in sorted_groups[:3]
+        )
 
         family_winner_ids: dict[str, str] = {}
-        family_groups: dict[str, list[PhaseThreeTrialRecord]] = {}
-        for record in records.values():
-            family_groups.setdefault(record.family, []).append(record)
+        family_groups: dict[str, list[dict[str, Any]]] = {}
+        for payload in sorted_groups:
+            family_groups.setdefault(str(payload["family"]), []).append(payload)
 
-        for family, family_records in family_groups.items():
-            winner = max(family_records, key=lambda record: record.validation_macro_f1)
-            family_winner_ids[family] = winner.trial_id
+        for family, family_payloads in family_groups.items():
+            winner = max(family_payloads, key=lambda payload: payload["mean_validation_macro_f1"])
+            family_winner_ids[family] = str(winner["representative_trial_id"])
 
         return best_trial_id, top_three_trial_ids, family_winner_ids
 
@@ -565,27 +723,29 @@ class PhaseThreeSweepRunner:
         optimizer_summary = _phase_three_optimizer_config(optimizer_artifact)
 
         state = self.load_state()
-        best_trial_id = state.best_trial_id
+        best_trial_id, top_three_trial_ids, family_winner_ids = self._select_winners(
+            state.completed_trials
+        )
         best_score = (
-            state.best_validation_macro_f1 if state.best_validation_macro_f1 is not None else -1.0
+            state.completed_trials[best_trial_id].validation_macro_f1
+            if best_trial_id is not None
+            else None
         )
 
         for trial in build_phase_three_trials():
             if trial.trial_id in state.completed_trials:
-                existing = state.completed_trials[trial.trial_id]
-                if existing.validation_macro_f1 >= best_score:
-                    best_trial_id = trial.trial_id
-                    best_score = existing.validation_macro_f1
                 continue
 
             trial_record = self._run_trial(trial, feature_summary, optimizer_summary)
             completed_trials = {**state.completed_trials, trial.trial_id: trial_record}
-            if trial_record.validation_macro_f1 >= best_score:
-                best_trial_id = trial.trial_id
-                best_score = trial_record.validation_macro_f1
 
             best_trial_id, top_three_trial_ids, family_winner_ids = self._select_winners(
                 completed_trials
+            )
+            best_score = (
+                completed_trials[best_trial_id].validation_macro_f1
+                if best_trial_id is not None
+                else None
             )
             state = PhaseThreeSweepState(
                 schema_version=state.schema_version,
@@ -594,7 +754,7 @@ class PhaseThreeSweepRunner:
                 phase_two_best_optim_path=state.phase_two_best_optim_path,
                 completed_trials=completed_trials,
                 best_trial_id=best_trial_id,
-                best_validation_macro_f1=best_score if best_score >= 0.0 else None,
+                best_validation_macro_f1=best_score,
                 top_three_trial_ids=top_three_trial_ids,
                 family_winner_ids=family_winner_ids,
                 created_at=state.created_at,

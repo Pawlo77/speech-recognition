@@ -6,6 +6,8 @@ from typing import Final, cast
 import torch
 from torch import Tensor, nn
 
+from ..config import ModelConfig
+
 NUM_KAGGLE_CLASSES: Final[int] = 32
 """Number of classes in the Kaggle speech-command label space."""
 
@@ -72,8 +74,18 @@ class TinyConvNeXtBackbone(nn.Module):
 class SSMambaFallbackBackbone(nn.Module):
     """Fallback for SSAMBA using causal conv + linear state-space recurrence."""
 
-    def __init__(self, num_classes: int, hidden_dim: int = 64) -> None:
+    def __init__(
+        self,
+        num_classes: int,
+        hidden_dim: int = 64,
+        pooling: str = "mean",
+        use_cls: bool = True,
+        stride_ms: int = 10,
+    ) -> None:
         super().__init__()
+        self.pooling = pooling
+        self.use_cls = use_cls
+        self.stride_frames = 1 if stride_ms == 10 else 2
         self.pre = nn.Conv1d(1, hidden_dim, kernel_size=3, padding=2)
         self.state_a = nn.Linear(hidden_dim, hidden_dim, bias=False)
         self.state_b = nn.Linear(hidden_dim, hidden_dim, bias=False)
@@ -82,7 +94,10 @@ class SSMambaFallbackBackbone(nn.Module):
 
     def forward(self, inputs: Tensor) -> Tensor:
         sequence = inputs.mean(dim=2)
-        hidden = self.pre(sequence)[..., :-2].transpose(1, 2)
+        hidden = self.pre(sequence)[..., :-2]
+        if self.stride_frames > 1:
+            hidden = hidden[..., :: self.stride_frames]
+        hidden = hidden.transpose(1, 2)
 
         state = torch.zeros(
             hidden.size(0),
@@ -99,16 +114,29 @@ class SSMambaFallbackBackbone(nn.Module):
             outputs.append(state)
 
         stacked = torch.stack(outputs, dim=1)
-        pooled = stacked.mean(dim=1)
+        if self.use_cls:
+            pooled = stacked[:, 0, :]
+        elif self.pooling == "max":
+            pooled = stacked.max(dim=1).values
+        else:
+            pooled = stacked.mean(dim=1)
         return self.head(pooled)
 
 
 class MatrixMemoryXLSTMFallback(nn.Module):
     """Minimal matrix-memory xLSTM-style fallback with C_t in R^(d x d)."""
 
-    def __init__(self, num_classes: int, memory_dim: int = 16) -> None:
+    def __init__(
+        self,
+        num_classes: int,
+        memory_dim: int = 32,
+        state_reset: bool = True,
+        output_mode: str = "final",
+    ) -> None:
         super().__init__()
         self.memory_dim = memory_dim
+        self.state_reset = state_reset
+        self.output_mode = output_mode
         self.input_proj = nn.Linear(1, memory_dim)
         self.query_proj = nn.Linear(memory_dim, memory_dim)
         self.key_proj = nn.Linear(memory_dim, memory_dim)
@@ -143,16 +171,28 @@ class MatrixMemoryXLSTMFallback(nn.Module):
             readout = torch.einsum("bij,bj->bi", memory, query)
             readouts.append(readout)
 
-        pooled = torch.stack(readouts, dim=1).mean(dim=1)
+        stacked = torch.stack(readouts, dim=1)
+        if not self.state_reset:
+            memory = memory + 0.01
+        pooled = stacked[:, -1, :] if self.output_mode == "final" else stacked.mean(dim=1)
         return self.head(pooled)
 
 
 class TinyMLPMixerBackbone(nn.Module):
     """Compact MLP-Mixer fallback operating on spectrogram patches."""
 
-    def __init__(self, num_classes: int, hidden_dim: int = 64, patch_size: int = 8) -> None:
+    def __init__(
+        self,
+        num_classes: int,
+        hidden_dim: int = 64,
+        patch_size: int = 8,
+        dropout: float = 0.0,
+        head_l2_norm: bool = True,
+    ) -> None:
         super().__init__()
         self.patch_size = patch_size
+        self.head_l2_norm = head_l2_norm
+        self.dropout = nn.Dropout(dropout)
         self.patch_embed = nn.Conv2d(1, hidden_dim, kernel_size=patch_size, stride=patch_size)
         self.token_mlp = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim * 2),
@@ -173,7 +213,11 @@ class TinyMLPMixerBackbone(nn.Module):
         tokens = tokens + self.token_mlp(tokens)
         tokens = tokens + self.channel_mlp(tokens)
         pooled = self.norm(tokens).mean(dim=1)
-        return self.head(pooled)
+        pooled = self.dropout(pooled)
+        logits = self.head(pooled)
+        if self.head_l2_norm:
+            logits = logits / logits.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        return logits
 
 
 class ASTBackboneWrapper(nn.Module):
@@ -271,7 +315,7 @@ class KWSModelAdapter(nn.Module):
         return self.forward_pass(input_tensor)
 
 
-ModelBuilder = Callable[[int, bool], tuple[nn.Module, str, bool]]
+ModelBuilder = Callable[[ModelConfig], tuple[nn.Module, str, bool]]
 
 
 class ModelRegistry:
@@ -293,24 +337,33 @@ class ModelRegistry:
 
     def create(
         self,
-        family: str,
+        family: str | None = None,
         num_classes: int = NUM_KAGGLE_CLASSES,
         pretrained: bool = False,
         target_frames: int = DEFAULT_TARGET_FRAMES,
+        model_config: ModelConfig | None = None,
     ) -> KWSModelAdapter:
         """Build a family adapter with the shared KWS interface."""
 
+        if model_config is None:
+            if family is None:
+                raise ValueError("Either model_config or family must be provided.")
+            model_config = ModelConfig(
+                family=family,
+                num_classes=num_classes,
+                pretrained=pretrained,
+            )
+
+        family = model_config.family
         if family not in self._builders:
             raise ValueError(f"Unsupported model family '{family}'.")
 
-        backbone, source_library, ast_three_channel = self._builders[family](
-            num_classes, pretrained
-        )
+        backbone, source_library, ast_three_channel = self._builders[family](model_config)
         return KWSModelAdapter(
             family=family,
             source_library=source_library,
             backbone=backbone,
-            num_classes=num_classes,
+            num_classes=model_config.num_classes,
             target_frames=target_frames,
             ast_uses_three_channels=ast_three_channel,
         )
@@ -321,43 +374,48 @@ def build_model_adapter(
     num_classes: int = NUM_KAGGLE_CLASSES,
     pretrained: bool = False,
     target_frames: int = DEFAULT_TARGET_FRAMES,
+    model_config: ModelConfig | None = None,
 ) -> KWSModelAdapter:
     """Factory helper around ``ModelRegistry`` for direct adapter construction."""
 
-    return ModelRegistry().create(
+    effective_config = model_config or ModelConfig(
         family=family,
         num_classes=num_classes,
         pretrained=pretrained,
-        target_frames=target_frames,
     )
+    return ModelRegistry().create(model_config=effective_config, target_frames=target_frames)
 
 
-def _build_ast_backbone(num_classes: int, pretrained: bool) -> tuple[nn.Module, str, bool]:
+def _build_ast_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool]:
     """Build AST from ``transformers`` first, else use a lightweight fallback."""
 
     try:
         from transformers import ASTConfig, ASTForAudioClassification
 
         config = ASTConfig(
-            num_labels=num_classes,
-            hidden_dropout_prob=0.1,
-            attention_probs_dropout_prob=0.1,
+            num_labels=model_config.num_classes,
+            hidden_dropout_prob=float(model_config.dropout),
+            attention_probs_dropout_prob=float(model_config.dropout),
             max_length=DEFAULT_TARGET_FRAMES,
             num_mel_bins=DEFAULT_INPUT_BINS,
         )
         return ASTBackboneWrapper(ASTForAudioClassification(config)), "transformers", False
     except Exception:
-        in_chans = 3 if pretrained else 1
-        return TinyAstBackbone(num_classes=num_classes, in_chans=in_chans), "fallback", pretrained
+        in_chans = 3 if model_config.pretrained else 1
+        return (
+            TinyAstBackbone(num_classes=model_config.num_classes, in_chans=in_chans),
+            "fallback",
+            model_config.pretrained,
+        )
 
 
-def _build_convnext_backbone(num_classes: int, pretrained: bool) -> tuple[nn.Module, str, bool]:
+def _build_convnext_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool]:
     """Build ConvNeXt from torchvision/timm with a 1-channel stem when available."""
 
     try:
         from torchvision.models import convnext_tiny
 
-        model = convnext_tiny(weights=None, num_classes=num_classes)
+        model = convnext_tiny(weights=None, num_classes=model_config.num_classes)
         original = model.features[0][0]
         model.features[0][0] = nn.Conv2d(
             1,
@@ -374,19 +432,23 @@ def _build_convnext_backbone(num_classes: int, pretrained: bool) -> tuple[nn.Mod
 
             model = timm.create_model(
                 "convnext_tiny",
-                pretrained=pretrained,
+                pretrained=model_config.pretrained,
                 in_chans=1,
-                num_classes=num_classes,
+                num_classes=model_config.num_classes,
+                drop_path_rate=float(model_config.stochastic_depth),
             )
             return model, "timm", False
         except Exception:
-            return TinyConvNeXtBackbone(num_classes=num_classes, in_chans=1), "fallback", False
+            return (
+                TinyConvNeXtBackbone(num_classes=model_config.num_classes, in_chans=1),
+                "fallback",
+                False,
+            )
 
 
-def _build_ssamba_backbone(num_classes: int, pretrained: bool) -> tuple[nn.Module, str, bool]:
+def _build_ssamba_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool]:
     """Build SSAMBA from mamba-ssm with Apple-silicon-safe fallback."""
 
-    _ = pretrained
     try:
         from mamba_ssm import Mamba
 
@@ -397,27 +459,55 @@ def _build_ssamba_backbone(num_classes: int, pretrained: bool) -> tuple[nn.Modul
                 super().__init__()
                 self.input_proj = nn.Linear(1, 64)
                 self.mamba = Mamba(d_model=64, d_state=16, d_conv=4, expand=2)
-                self.head = nn.Linear(64, num_classes)
+                self.pooling = model_config.ssamba_pooling
+                self.use_cls = model_config.ssamba_use_cls
+                self.stride_frames = 1 if model_config.ssamba_stride_ms == 10 else 2
+                self.head = nn.Linear(64, model_config.num_classes)
 
             def forward(self, inputs: Tensor) -> Tensor:
                 sequence = inputs.mean(dim=2).transpose(1, 2).unsqueeze(-1)
                 hidden = self.input_proj(sequence)
+                if self.stride_frames > 1:
+                    hidden = hidden[:, :: self.stride_frames, :]
                 hidden = self.mamba(hidden)
-                return self.head(hidden.mean(dim=1))
+                if self.use_cls:
+                    pooled = hidden[:, 0, :]
+                elif self.pooling == "max":
+                    pooled = hidden.max(dim=1).values
+                else:
+                    pooled = hidden.mean(dim=1)
+                return self.head(pooled)
 
         return MambaHead(), "mamba-ssm", False
     except Exception:
-        return SSMambaFallbackBackbone(num_classes=num_classes), "fallback", False
+        return (
+            SSMambaFallbackBackbone(
+                num_classes=model_config.num_classes,
+                pooling=model_config.ssamba_pooling,
+                use_cls=model_config.ssamba_use_cls,
+                stride_ms=model_config.ssamba_stride_ms,
+            ),
+            "fallback",
+            False,
+        )
 
 
-def _build_xlstm_backbone(num_classes: int, pretrained: bool) -> tuple[nn.Module, str, bool]:
+def _build_xlstm_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool]:
     """Build xLSTM from external package when available, otherwise matrix-memory fallback."""
 
-    _ = pretrained
-    return MatrixMemoryXLSTMFallback(num_classes=num_classes), "fallback", False
+    return (
+        MatrixMemoryXLSTMFallback(
+            num_classes=model_config.num_classes,
+            memory_dim=model_config.xlstm_dim,
+            state_reset=model_config.xlstm_state_reset,
+            output_mode=model_config.xlstm_output_mode,
+        ),
+        "fallback",
+        False,
+    )
 
 
-def _build_mlp_mixer_backbone(num_classes: int, pretrained: bool) -> tuple[nn.Module, str, bool]:
+def _build_mlp_mixer_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool]:
     """Build MLP-Mixer from timm when present, else use compact fallback."""
 
     try:
@@ -425,10 +515,19 @@ def _build_mlp_mixer_backbone(num_classes: int, pretrained: bool) -> tuple[nn.Mo
 
         model = timm.create_model(
             "mixer_b16_224",
-            pretrained=pretrained,
+            pretrained=model_config.pretrained,
             in_chans=1,
-            num_classes=num_classes,
+            num_classes=model_config.num_classes,
+            drop_rate=float(model_config.dropout),
         )
         return model, "timm", False
     except Exception:
-        return TinyMLPMixerBackbone(num_classes=num_classes), "fallback", False
+        return (
+            TinyMLPMixerBackbone(
+                num_classes=model_config.num_classes,
+                dropout=model_config.dropout,
+                head_l2_norm=model_config.mlp_head_l2_norm,
+            ),
+            "fallback",
+            False,
+        )

@@ -20,7 +20,7 @@ def _require_pcm16(sample_width: int) -> None:
 
 
 def _frames_to_int16_samples(frames: bytes, sample_width: int) -> list[int]:
-    """Convert PCM16 frames into integer samples."""
+    """Convert PCM16 frames into a list of signed 16-bit integer samples."""
 
     _require_pcm16(sample_width)
     samples = array("h")
@@ -29,14 +29,14 @@ def _frames_to_int16_samples(frames: bytes, sample_width: int) -> list[int]:
 
 
 def _int16_samples_to_frames(samples: list[int]) -> bytes:
-    """Convert integer samples into clipped PCM16 frames."""
+    """Convert a list of integer samples back into PCM16 byte frames with clipping."""
 
     clipped = array("h", [max(-32768, min(32767, sample)) for sample in samples])
     return clipped.tobytes()
 
 
 def _pcm_avg(frames: bytes, sample_width: int) -> int:
-    """Return the integer mean sample value."""
+    """Return the integer mean sample value of PCM16 frames."""
 
     samples = _frames_to_int16_samples(frames, sample_width)
     if not samples:
@@ -45,7 +45,7 @@ def _pcm_avg(frames: bytes, sample_width: int) -> int:
 
 
 def _pcm_rms(frames: bytes, sample_width: int) -> int:
-    """Return RMS energy for PCM16 samples."""
+    """Return RMS energy for a PCM16 byte stream."""
 
     samples = _frames_to_int16_samples(frames, sample_width)
     if not samples:
@@ -55,7 +55,7 @@ def _pcm_rms(frames: bytes, sample_width: int) -> int:
 
 
 def _pcm_bias(frames: bytes, sample_width: int, bias: int) -> bytes:
-    """Add a constant bias to all samples."""
+    """Add a constant bias to all PCM16 samples."""
 
     samples = _frames_to_int16_samples(frames, sample_width)
     return _int16_samples_to_frames([sample + bias for sample in samples])

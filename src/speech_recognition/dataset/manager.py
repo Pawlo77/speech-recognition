@@ -737,16 +737,7 @@ class SpeechCommandsDataset(UnknownSampleGenerationMixin):
                 "Minimal dataset is empty after filtering to SMALLER_DATASET_LABELS."
             )
 
-        shuffled = selected_samples[:]
-        rng = random.Random(self.seed)  # noqa: S311 - deterministic split only
-        rng.shuffle(shuffled)
-
-        n_val = max(1, int(len(shuffled) * self.val_ratio))
-        n_test = max(1, int(len(shuffled) * self.test_ratio))
-
-        val_samples = shuffled[:n_val]
-        test_samples = shuffled[n_val : n_val + n_test]
-        train_samples = shuffled[n_val + n_test :]
+        train_samples, val_samples, test_samples = self._stratified_split_samples(selected_samples)
 
         train_rel_paths = sorted(
             sample.path.relative_to(train_audio_dir).as_posix() for sample in train_samples
@@ -779,16 +770,7 @@ class SpeechCommandsDataset(UnknownSampleGenerationMixin):
         if not extended_samples:
             raise RuntimeError("Extended dataset is empty; no samples were found.")
 
-        shuffled = extended_samples[:]
-        rng = random.Random(self.seed)  # noqa: S311 - deterministic split only
-        rng.shuffle(shuffled)
-
-        n_val = max(1, int(len(shuffled) * self.val_ratio))
-        n_test = max(1, int(len(shuffled) * self.test_ratio))
-
-        val_samples = shuffled[:n_val]
-        test_samples = shuffled[n_val : n_val + n_test]
-        train_samples = shuffled[n_val + n_test :]
+        train_samples, val_samples, test_samples = self._stratified_split_samples(extended_samples)
 
         train_rel_paths = sorted(
             sample.path.relative_to(train_audio_dir).as_posix() for sample in train_samples
@@ -819,3 +801,45 @@ class SpeechCommandsDataset(UnknownSampleGenerationMixin):
             len(val_rel_paths),
             len(test_rel_paths),
         )
+
+    def _stratified_split_samples(
+        self,
+        samples: list[Sample],
+    ) -> tuple[list[Sample], list[Sample], list[Sample]]:
+        """Split samples per label to preserve class distribution across splits."""
+
+        grouped: dict[str, list[Sample]] = {}
+        for sample in samples:
+            grouped.setdefault(sample.label, []).append(sample)
+
+        rng = random.Random(self.seed)  # noqa: S311 - deterministic split only
+        train_samples: list[Sample] = []
+        val_samples: list[Sample] = []
+        test_samples: list[Sample] = []
+
+        for label_samples in grouped.values():
+            shuffled = label_samples[:]
+            rng.shuffle(shuffled)
+
+            total = len(shuffled)
+            if total == 1:
+                train_samples.extend(shuffled)
+                continue
+
+            n_val = int(total * self.val_ratio)
+            n_test = int(total * self.test_ratio)
+            if n_val + n_test >= total:
+                overflow = (n_val + n_test) - (total - 1)
+                reduce_val = min(n_val, overflow)
+                n_val -= reduce_val
+                overflow -= reduce_val
+                n_test -= min(n_test, overflow)
+
+            val_samples.extend(shuffled[:n_val])
+            test_samples.extend(shuffled[n_val : n_val + n_test])
+            train_samples.extend(shuffled[n_val + n_test :])
+
+        if not train_samples:
+            raise RuntimeError("Stratified split generation produced an empty training split.")
+
+        return train_samples, val_samples, test_samples

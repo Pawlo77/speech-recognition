@@ -14,6 +14,7 @@ from .orchestration.phase_four import PhaseFourSweepRunner
 from .orchestration.phase_one import PhaseOneSweepRunner
 from .orchestration.phase_three import PhaseThreeSweepRunner
 from .orchestration.phase_two import PhaseTwoSweepRunner
+from .orchestration.runtime import execute_single_eval, execute_single_train
 
 DEFAULT_OUTPUT_DIR = Path("outputs")
 """Default directory for pipeline runs."""
@@ -228,6 +229,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = None
         if args.config is not None or args.overrides:
             config = load_experiment_config(args.config, args.overrides)
+        if args.command == "run-single-train":
+            payload = execute_single_train(
+                config or ExperimentConfig(), args.output_dir, args.run_name
+            )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0
+        if args.command == "run-single-eval":
+            payload = execute_single_eval(
+                config or ExperimentConfig(), args.output_dir, args.run_name
+            )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0
         if args.command == "phase-1":
             sweep_runner = PhaseOneSweepRunner(args.output_dir, base_config=config)
             payload = sweep_runner.execute()
