@@ -121,4 +121,10 @@ Local MLflow runs are stored under `mlruns/` by default. Launch the UI with:
 
 ```bash
 make mlflow
+
+# equivalent direct command
+mlflow ui --backend-store-uri mlruns
+
+# equivalent CLI entry point
+speech-recognition mlflow-ui
 ```
