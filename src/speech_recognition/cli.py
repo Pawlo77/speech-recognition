@@ -10,6 +10,7 @@ from typing import Any
 
 from .config import ConfigValidationError, ExperimentConfig, MLflowTrackingConfig
 from .orchestration import PipelineRunner, PipelineStateStore, build_mlflow_tracker
+from .orchestration.phase_one import PhaseOneSweepRunner
 
 DEFAULT_OUTPUT_DIR = Path("outputs")
 """Default directory for pipeline runs."""
@@ -224,6 +225,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = None
         if args.config is not None or args.overrides:
             config = load_experiment_config(args.config, args.overrides)
+        if args.command == "phase-1":
+            sweep_runner = PhaseOneSweepRunner(args.output_dir, base_config=config)
+            payload = sweep_runner.execute()
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0
         store = PipelineStateStore(args.output_dir)
         runner = PipelineRunner(store=store, config=config, run_name=args.run_name)
         tracker = None
