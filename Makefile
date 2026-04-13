@@ -7,7 +7,7 @@ export PYTHONPATH=.
 export PYTORCH_ENABLE_MPS_FALLBACK=1
 export OMP_NUM_THREADS=1
 
-.PHONY: help install clean test pre-commit pre-commit-all phase-1 phase-2 phase-3 phase-4 full-pipeline
+.PHONY: help install clean test pre-commit pre-commit-all phase-1 phase-2 phase-3 phase-4 full-pipeline mlflow
 
 ############################
 # Repo Maintenance Targets #
@@ -63,3 +63,6 @@ phase-4:
 
 full-pipeline:
 	uv run speech-recognition run --output-dir outputs --run-name default
+
+mlflow:
+	uv run mlflow ui --backend-store-uri .mlruns
