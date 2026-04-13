@@ -260,7 +260,12 @@ class PhaseFourTrialSpec:
             warmup_iterations=PHASE_FOUR_WARMUP_ITERATIONS,
             max_core_command_f1_drop=PHASE_FOUR_STRICT_DROP_LIMIT,
         )
-        dataset = replace(base_config.dataset, train_split="train_full", valid_split="valid_full")
+        dataset = replace(
+            base_config.dataset,
+            train_split="train_extended",
+            valid_split="valid_extended",
+            test_split="test_extended",
+        )
         phase_config = replace(base_config.phase, phase="phase_4")
         return replace(
             base_config,
@@ -617,13 +622,16 @@ class PhaseFourSweepRunner:
                     if not payloads:
                         continue
                     targets = payloads[0]["targets"]
+                    labels = payloads[0].get("labels", [])
+                    unknown_idx = labels.index("__unknown__") if "__unknown__" in labels else None
+                    silence_idx = labels.index("__silence__") if "__silence__" in labels else None
+                    if unknown_idx is None or silence_idx is None:
+                        continue
                     probabilities = [
                         np.array(payload["probs"], dtype=float) for payload in payloads
                     ]
                     averaged = sum(probabilities) / float(len(probabilities))
                     predictions = averaged.argmax(axis=1).tolist()
-                    unknown_idx = 30
-                    silence_idx = 31
                     unknown_tp = sum(
                         1
                         for target, pred in zip(targets, predictions, strict=True)

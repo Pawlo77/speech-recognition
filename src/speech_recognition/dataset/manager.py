@@ -1,6 +1,7 @@
 """Dataset utilities for Kaggle speech recognition challenge."""
 
 import csv
+import hashlib
 import importlib
 import logging
 import random
@@ -80,18 +81,35 @@ class SpeechCommandsDataset(UnknownSampleGenerationMixin):
     BACKGROUND_NOISE_LABEL: Final[str] = "_background_noise_"
     """Label name for background noise directory."""
 
-    SMALLER_DATASET_LABELS: Final[set[str]] = {
-        "one",
-        "two",
-        "three",
-        "four",
-        "five",
-        "six",
-        "seven",
-        "eight",
-        "nine",
-        "zero",
-    }
+    SILENCE_LABEL: Final[str] = "__silence__"
+    """Canonical silence label used by training/evaluation code."""
+
+    PADDED_AUDIO_DIR: Final[str] = "__padded_1sec__"
+    """Internal directory used for generated padded clips."""
+
+    TARGET_COMMAND_LABELS: Final[tuple[str, ...]] = (
+        "yes",
+        "no",
+        "up",
+        "down",
+        "left",
+        "right",
+        "on",
+        "off",
+        "stop",
+        "go",
+    )
+    """Command labels kept as dedicated classes in the 12-class setup."""
+
+    UNKNOWN_ORIGIN_CSV: Final[str] = "train/split_lists/unknown_origin_labels.csv"
+    """CSV mapping merged unknown samples back to their original labels."""
+
+    SMALL_TRAIN_PER_CLASS: Final[int] = 1000
+    SMALL_VAL_PER_CLASS: Final[int] = 250
+    SMALL_TEST_PER_CLASS: Final[int] = 250
+    MAX_EXTENDED_UNKNOWN_PER_SPLIT: Final[int] = 20000
+
+    SMALLER_DATASET_LABELS: Final[set[str]] = set(TARGET_COMMAND_LABELS)
 
     def __init__(
         self,
@@ -160,23 +178,15 @@ class SpeechCommandsDataset(UnknownSampleGenerationMixin):
         ).exists():
             self._split_background_noise_samples()
 
+        self._write_unknown_origin_map()
+
         if (
             not self.use_smaller_dataset and self.use_extended_dataset
             # and not (self.dataset_root / "train" / "audio" / self.UNKNOWN_LABEL).exists()
         ):
             self._create_unknown_label_samples()
 
-        if (
-            self.use_smaller_dataset
-            and not (self.dataset_root / self.SMALL_TRAIN_LIST_FILE).exists()
-        ):
-            self._create_minimal_dataset()
-
-        if (
-            self.use_extended_dataset
-            and not (self.dataset_root / self.EXTENDED_TRAIN_LIST_FILE).exists()
-        ):
-            self._create_extended_dataset()
+        self._regenerate_split_lists()
 
         self._samples: dict[Split, list[Sample]] = self._build_splits()
         logger.info("Dataset initialized with split sizes: %s", self.stats())
@@ -253,6 +263,103 @@ class SpeechCommandsDataset(UnknownSampleGenerationMixin):
         except (OSError, wave.Error) as exc:
             logger.warning("Failed to read WAV duration for '%s': %s", sample.path, exc)
             return False
+
+    def _duration_in_frames(self, sample: Sample) -> int | None:
+        """Return number of audio frames for a sample, or None on read failure."""
+
+        try:
+            with wave.open(str(sample.path), "rb") as wav_file:
+                return wav_file.getnframes()
+        except (OSError, wave.Error) as exc:
+            logger.warning("Failed to read WAV frame count for '%s': %s", sample.path, exc)
+            return None
+
+    def _is_shorter_than_1sec(self, sample: Sample) -> bool:
+        """Check whether a sample is shorter than one second at 16 kHz."""
+
+        frame_count = self._duration_in_frames(sample)
+        return frame_count is not None and frame_count < 16000
+
+    def _pad_sample_to_1sec(self, sample: Sample) -> Sample:
+        """Create (or reuse) a zero-padded 1-second copy for short clips."""
+
+        train_audio_dir = self.dataset_root / "train" / "audio"
+        rel_path = sample.path.relative_to(train_audio_dir)
+        padded_dir = train_audio_dir / "__padded_1sec__" / rel_path.parent
+        padded_dir.mkdir(parents=True, exist_ok=True)
+        padded_path = padded_dir / f"{sample.path.stem}__pad1s.wav"
+
+        if padded_path.exists():
+            return Sample(path=padded_path, label=sample.label, filename=padded_path.name)
+
+        with wave.open(str(sample.path), "rb") as source_wav:
+            channels = source_wav.getnchannels()
+            sample_width = source_wav.getsampwidth()
+            sample_rate = source_wav.getframerate()
+            frames = source_wav.readframes(source_wav.getnframes())
+
+        if sample_rate != 16000:
+            logger.warning(
+                "Sample '%s' has sample rate %d (expected 16000). Skipping padding.",
+                sample.path,
+                sample_rate,
+            )
+            return sample
+
+        frame_count = len(frames) // max(1, sample_width * channels)
+        if frame_count >= 16000:
+            return sample
+
+        pad_frames = 16000 - frame_count
+        frames += b"\x00" * (pad_frames * sample_width * channels)
+
+        with wave.open(str(padded_path), "wb") as padded_wav:
+            padded_wav.setnchannels(channels)
+            padded_wav.setsampwidth(sample_width)
+            padded_wav.setframerate(sample_rate)
+            padded_wav.writeframes(frames)
+
+        return Sample(path=padded_path, label=sample.label, filename=padded_path.name)
+
+    def _canonicalize_label(self, label: str) -> str:
+        """Map raw dataset labels into the 12-class taxonomy."""
+
+        if label == self.BACKGROUND_NOISE_LABEL:
+            return self.SILENCE_LABEL
+        if label in self.TARGET_COMMAND_LABELS:
+            return label
+        return self.UNKNOWN_LABEL
+
+    def _write_unknown_origin_map(self) -> None:
+        """Persist mapping from merged unknown samples to original source labels."""
+
+        train_audio_dir = self.dataset_root / "train" / "audio"
+        if not train_audio_dir.exists():
+            return
+
+        rows: list[tuple[str, str, str]] = []
+        for label_dir in sorted(train_audio_dir.iterdir()):
+            if not label_dir.is_dir():
+                continue
+            if label_dir.name == self.PADDED_AUDIO_DIR:
+                continue
+
+            original_label = label_dir.name
+            if original_label in (*self.TARGET_COMMAND_LABELS, self.BACKGROUND_NOISE_LABEL):
+                continue
+
+            for wav_file in sorted(label_dir.glob("*.wav")):
+                rel_path = wav_file.relative_to(train_audio_dir).as_posix()
+                rows.append((rel_path, original_label, self.UNKNOWN_LABEL))
+
+        csv_path = self.dataset_root / self.UNKNOWN_ORIGIN_CSV
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with csv_path.open("w", newline="", encoding="utf-8") as csv_handle:
+            writer = csv.writer(csv_handle)
+            writer.writerow(["relative_path", "original_label", "merged_label"])
+            writer.writerows(rows)
+
+        logger.info("Saved unknown origin mapping CSV with %d rows: %s", len(rows), csv_path)
 
     def _infer_repo_root(self) -> Path:
         """Infer repository root from file location."""
@@ -411,15 +518,9 @@ class SpeechCommandsDataset(UnknownSampleGenerationMixin):
         all_labeled = self._collect_labeled_samples(train_audio)
         if self.use_extended_dataset:
             split_candidates = all_labeled
-        elif self.use_smaller_dataset:
-            split_candidates = [
-                sample for sample in all_labeled if sample.label in self.SMALLER_DATASET_LABELS
-            ]
         else:
             split_candidates = [
-                sample
-                for sample in all_labeled
-                if sample.label not in {self.UNKNOWN_LABEL, self.BACKGROUND_NOISE_LABEL}
+                sample for sample in all_labeled if sample.label in self.SMALLER_DATASET_LABELS
             ]
 
         train_list_file, val_list_file, test_list_file = self._split_list_files()
@@ -437,6 +538,7 @@ class SpeechCommandsDataset(UnknownSampleGenerationMixin):
             train_samples, val_samples, test_samples = self._split_with_official_lists(
                 all_labeled=split_candidates,
                 train_audio_dir=train_audio,
+                train_rel_paths=train_rel_paths,
                 val_rel_paths=val_rel_paths,
                 test_rel_paths=test_rel_paths,
             )
@@ -455,23 +557,39 @@ class SpeechCommandsDataset(UnknownSampleGenerationMixin):
             )
 
         if self.only_1sec_samples:
-            logger.info("Filtering splits to keep only 1-second samples (only_1sec_samples=True)")
-            train_before = len(train_samples)
-            val_before = len(val_samples)
-            test_before = len(test_samples)
+            logger.info(
+                "Normalizing split durations for 1-second mode: short clips are zero-padded, "
+                "long clips are excluded."
+            )
 
-            train_samples = [s for s in train_samples if self._is_1sec_sample(s)]
-            val_samples = [s for s in val_samples if self._is_1sec_sample(s)]
-            test_samples = [s for s in test_samples if self._is_1sec_sample(s)]
+            def _normalize(samples: list[Sample]) -> tuple[list[Sample], int, int]:
+                normalized: list[Sample] = []
+                padded = 0
+                dropped_long = 0
+                for sample in samples:
+                    if self._is_1sec_sample(sample):
+                        normalized.append(sample)
+                        continue
+                    if self._is_shorter_than_1sec(sample):
+                        normalized.append(self._pad_sample_to_1sec(sample))
+                        padded += 1
+                        continue
+                    dropped_long += 1
+                return normalized, padded, dropped_long
+
+            train_samples, train_padded, train_dropped = _normalize(train_samples)
+            val_samples, val_padded, val_dropped = _normalize(val_samples)
+            test_samples, test_padded, test_dropped = _normalize(test_samples)
 
             logger.info(
-                "After 1-second filtering: train=%d->%d, val=%d->%d, test=%d->%d",
-                train_before,
-                len(train_samples),
-                val_before,
-                len(val_samples),
-                test_before,
-                len(test_samples),
+                "1-second normalization summary: train padded=%d dropped_long=%d, "
+                "val padded=%d dropped_long=%d, test padded=%d dropped_long=%d",
+                train_padded,
+                train_dropped,
+                val_padded,
+                val_dropped,
+                test_padded,
+                test_dropped,
             )
 
         logger.info(
@@ -486,10 +604,12 @@ class SpeechCommandsDataset(UnknownSampleGenerationMixin):
         self,
         all_labeled: list[Sample],
         train_audio_dir: Path,
+        train_rel_paths: list[str],
         val_rel_paths: list[str],
         test_rel_paths: list[str],
     ) -> tuple[list[Sample], list[Sample], list[Sample]]:
         """Split using official validation/testing lists."""
+        train_set = set(train_rel_paths)
         val_set = set(val_rel_paths)
         test_set = set(test_rel_paths)
 
@@ -503,7 +623,7 @@ class SpeechCommandsDataset(UnknownSampleGenerationMixin):
                 val_samples.append(sample)
             elif rel in test_set:
                 test_samples.append(sample)
-            else:
+            elif rel in train_set:
                 train_samples.append(sample)
 
         return train_samples, val_samples, test_samples
@@ -515,8 +635,10 @@ class SpeechCommandsDataset(UnknownSampleGenerationMixin):
         for label_dir in sorted(train_audio.iterdir()):
             if not label_dir.is_dir():
                 continue
+            if label_dir.name == self.PADDED_AUDIO_DIR:
+                continue
 
-            label = label_dir.name
+            label = self._canonicalize_label(label_dir.name)
             for wav_file in sorted(label_dir.glob("*.wav")):
                 samples.append(Sample(path=wav_file, label=label, filename=wav_file.name))
 
@@ -610,6 +732,239 @@ class SpeechCommandsDataset(UnknownSampleGenerationMixin):
             self.dataset_root / self.TRAIN_LIST_FILE,
             self.dataset_root / self.VAL_LIST_FILE,
             self.dataset_root / self.TEST_LIST_FILE,
+        )
+
+    def _regenerate_split_lists(self) -> None:
+        """Generate all split-list variants according to the project split policy."""
+
+        train_audio_dir = self.dataset_root / "train" / "audio"
+        if not train_audio_dir.exists():
+            raise FileNotFoundError(f"Missing train audio directory: {train_audio_dir}")
+
+        all_rel_paths = sorted(
+            wav_path.relative_to(train_audio_dir).as_posix()
+            for label_dir in sorted(train_audio_dir.iterdir())
+            if label_dir.is_dir() and label_dir.name != self.PADDED_AUDIO_DIR
+            for wav_path in sorted(label_dir.glob("*.wav"))
+        )
+
+        official_val = set(self._read_rel_paths(self.dataset_root / self.VAL_LIST_FILE))
+        official_test = set(self._read_rel_paths(self.dataset_root / self.TEST_LIST_FILE))
+        official_train = [
+            rel_path
+            for rel_path in all_rel_paths
+            if rel_path not in official_val and rel_path not in official_test
+        ]
+
+        self._create_full_command_lists(official_train, official_val, official_test)
+        self._create_small_command_lists(all_rel_paths)
+        self._create_extended_lists(official_train, official_val, official_test)
+
+    def _is_target_rel_path(self, rel_path: str) -> bool:
+        label = Path(rel_path).parts[0]
+        return label in self.TARGET_COMMAND_LABELS
+
+    def _create_full_command_lists(
+        self,
+        official_train: list[str],
+        official_val: set[str],
+        official_test: set[str],
+    ) -> None:
+        """Create full split lists over all available target-command samples only."""
+
+        train_rel_paths = sorted([rel for rel in official_train if self._is_target_rel_path(rel)])
+        val_rel_paths = sorted([rel for rel in official_val if self._is_target_rel_path(rel)])
+        test_rel_paths = sorted([rel for rel in official_test if self._is_target_rel_path(rel)])
+
+        self._write_rel_paths(self.dataset_root / self.TRAIN_LIST_FILE, train_rel_paths)
+        self._write_rel_paths(self.dataset_root / self.VAL_LIST_FILE, val_rel_paths)
+        self._write_rel_paths(self.dataset_root / self.TEST_LIST_FILE, test_rel_paths)
+
+        logger.info(
+            "Command-only lists saved: train=%d, val=%d, test=%d",
+            len(train_rel_paths),
+            len(val_rel_paths),
+            len(test_rel_paths),
+        )
+
+    def _create_small_command_lists(self, all_rel_paths: list[str]) -> None:
+        """Create deterministic small command-only splits with fixed per-class sizes."""
+
+        rng = random.Random(self.seed)  # noqa: S311 - deterministic subset only
+        train_rel_paths: list[str] = []
+        val_rel_paths: list[str] = []
+        test_rel_paths: list[str] = []
+
+        required = self.SMALL_TRAIN_PER_CLASS + self.SMALL_VAL_PER_CLASS + self.SMALL_TEST_PER_CLASS
+        per_label: dict[str, list[str]] = {label: [] for label in self.TARGET_COMMAND_LABELS}
+        for rel_path in all_rel_paths:
+            label = Path(rel_path).parts[0]
+            if label in per_label:
+                per_label[label].append(rel_path)
+
+        for label in self.TARGET_COMMAND_LABELS:
+            label_samples = per_label[label]
+            if len(label_samples) < required:
+                raise RuntimeError(
+                    f"Not enough samples for label '{label}' to build small split "
+                    f"(required={required}, available={len(label_samples)})."
+                )
+            shuffled = label_samples[:]
+            rng.shuffle(shuffled)
+            train_rel_paths.extend(shuffled[: self.SMALL_TRAIN_PER_CLASS])
+            val_start = self.SMALL_TRAIN_PER_CLASS
+            val_end = val_start + self.SMALL_VAL_PER_CLASS
+            test_end = val_end + self.SMALL_TEST_PER_CLASS
+            val_rel_paths.extend(shuffled[val_start:val_end])
+            test_rel_paths.extend(shuffled[val_end:test_end])
+
+        self._write_rel_paths(
+            self.dataset_root / self.SMALL_TRAIN_LIST_FILE,
+            sorted(train_rel_paths),
+        )
+        self._write_rel_paths(self.dataset_root / self.SMALL_VAL_LIST_FILE, sorted(val_rel_paths))
+        self._write_rel_paths(self.dataset_root / self.SMALL_TEST_LIST_FILE, sorted(test_rel_paths))
+
+        logger.info(
+            "Small command-only lists saved with fixed per-class sizes: train=%d, val=%d, test=%d",
+            len(train_rel_paths),
+            len(val_rel_paths),
+            len(test_rel_paths),
+        )
+
+    def _canonical_label_from_rel_path(self, rel_path: str) -> str:
+        return self._canonicalize_label(Path(rel_path).parts[0])
+
+    def _unknown_dedup_key(self, rel_path: str, train_audio_dir: Path) -> str:
+        """Return dedup key for unknown sample using content hash."""
+
+        path = train_audio_dir / rel_path
+        return hashlib.sha1(path.read_bytes()).hexdigest()  # noqa: S324 - non-security hashing
+
+    def _balanced_extended_split(
+        self,
+        rel_paths: list[str],
+        train_audio_dir: Path,
+        rng: random.Random,
+    ) -> list[str]:
+        """Balance one extended split: keep all commands/silence, cap and dedupe unknown."""
+
+        command_paths = [
+            rel
+            for rel in rel_paths
+            if self._canonical_label_from_rel_path(rel) in self.TARGET_COMMAND_LABELS
+        ]
+        silence_paths = [
+            rel
+            for rel in rel_paths
+            if self._canonical_label_from_rel_path(rel) == self.SILENCE_LABEL
+        ]
+        unknown_paths = [
+            rel
+            for rel in rel_paths
+            if self._canonical_label_from_rel_path(rel) == self.UNKNOWN_LABEL
+        ]
+
+        seen: set[str] = set()
+        dedup_unknown: list[str] = []
+        for rel_path in unknown_paths:
+            key = self._unknown_dedup_key(rel_path, train_audio_dir)
+            if key in seen:
+                continue
+            seen.add(key)
+            dedup_unknown.append(rel_path)
+
+        target_unknown = min(len(command_paths), self.MAX_EXTENDED_UNKNOWN_PER_SPLIT)
+        if len(dedup_unknown) > target_unknown:
+            shuffled = dedup_unknown[:]
+            rng.shuffle(shuffled)
+            dedup_unknown = shuffled[:target_unknown]
+
+        return sorted(command_paths + dedup_unknown + silence_paths)
+
+    def _create_extended_lists(
+        self,
+        official_train: list[str],
+        official_val: set[str],
+        official_test: set[str],
+    ) -> None:
+        """Create balanced extended split lists with all 12 classes present."""
+
+        train_audio_dir = self.dataset_root / "train" / "audio"
+        rng = random.Random(self.seed)  # noqa: S311 - deterministic balancing only
+
+        command_train = sorted([rel for rel in official_train if self._is_target_rel_path(rel)])
+        command_val = sorted([rel for rel in official_val if self._is_target_rel_path(rel)])
+        command_test = sorted([rel for rel in official_test if self._is_target_rel_path(rel)])
+
+        unknown_pool = [
+            rel
+            for rel in sorted(official_train + sorted(official_val) + sorted(official_test))
+            if self._canonical_label_from_rel_path(rel) == self.UNKNOWN_LABEL
+        ]
+        seen_unknown: set[str] = set()
+        dedup_unknown_pool: list[str] = []
+        for rel in unknown_pool:
+            key = self._unknown_dedup_key(rel, train_audio_dir)
+            if key in seen_unknown:
+                continue
+            seen_unknown.add(key)
+            dedup_unknown_pool.append(rel)
+        rng.shuffle(dedup_unknown_pool)
+
+        unknown_train_target = min(len(command_train), self.MAX_EXTENDED_UNKNOWN_PER_SPLIT)
+        unknown_val_target = len(command_val)
+        unknown_test_target = len(command_test)
+        required_unknown = unknown_train_target + unknown_val_target + unknown_test_target
+        if len(dedup_unknown_pool) < required_unknown:
+            raise RuntimeError(
+                "Not enough deduplicated unknown samples to build balanced extended splits "
+                f"(required={required_unknown}, available={len(dedup_unknown_pool)})."
+            )
+
+        unknown_train = dedup_unknown_pool[:unknown_train_target]
+        offset = unknown_train_target
+        unknown_val = dedup_unknown_pool[offset : offset + unknown_val_target]
+        offset += unknown_val_target
+        unknown_test = dedup_unknown_pool[offset : offset + unknown_test_target]
+
+        silence_pool = [
+            rel
+            for rel in sorted(official_train + sorted(official_val) + sorted(official_test))
+            if self._canonical_label_from_rel_path(rel) == self.SILENCE_LABEL
+        ]
+        rng.shuffle(silence_pool)
+        total_commands = max(1, len(command_train) + len(command_val) + len(command_test))
+        silence_train_target = round(len(silence_pool) * len(command_train) / total_commands)
+        silence_val_target = round(len(silence_pool) * len(command_val) / total_commands)
+        silence_test_target = len(silence_pool) - silence_train_target - silence_val_target
+        if silence_pool:
+            silence_train_target = max(1, silence_train_target)
+            silence_val_target = max(1, silence_val_target)
+            silence_test_target = max(1, silence_test_target)
+            overflow = (
+                silence_train_target + silence_val_target + silence_test_target - len(silence_pool)
+            )
+            if overflow > 0:
+                silence_train_target = max(1, silence_train_target - overflow)
+
+        silence_train = silence_pool[:silence_train_target]
+        silence_val = silence_pool[silence_train_target : silence_train_target + silence_val_target]
+        silence_test = silence_pool[silence_train_target + silence_val_target :]
+
+        train_rel_paths = sorted(command_train + unknown_train + silence_train)
+        val_rel_paths = sorted(command_val + unknown_val + silence_val)
+        test_rel_paths = sorted(command_test + unknown_test + silence_test)
+
+        self._write_rel_paths(self.dataset_root / self.EXTENDED_TRAIN_LIST_FILE, train_rel_paths)
+        self._write_rel_paths(self.dataset_root / self.EXTENDED_VAL_LIST_FILE, val_rel_paths)
+        self._write_rel_paths(self.dataset_root / self.EXTENDED_TEST_LIST_FILE, test_rel_paths)
+
+        logger.info(
+            "Extended balanced lists saved: train=%d, val=%d, test=%d",
+            len(train_rel_paths),
+            len(val_rel_paths),
+            len(test_rel_paths),
         )
 
     def _collect_competition_test_samples(self) -> list[Sample]:

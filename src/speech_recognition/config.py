@@ -12,11 +12,11 @@ class ConfigValidationError(ValueError):
 DEFAULT_SEEDS: tuple[int, int, int] = (0, 42, 2003)
 """Default random seeds for reproducibility across all experiment phases."""
 
-ALLOWED_TRAIN_SPLITS: set[str] = {"train_small", "train_full"}
+ALLOWED_TRAIN_SPLITS: set[str] = {"train_small", "train_extended"}
 """Allowed dataset splits for training."""
-ALLOWED_VALID_SPLITS: set[str] = {"valid_small", "valid_full"}
+ALLOWED_VALID_SPLITS: set[str] = {"valid_small", "valid_extended"}
 """Allowed dataset splits for validation."""
-ALLOWED_TEST_SPLITS: set[str] = {"test"}
+ALLOWED_TEST_SPLITS: set[str] = {"test", "test_extended"}
 """Allowed dataset splits for testing."""
 
 ALLOWED_FEATURE_PIPELINES: set[str] = {
@@ -120,13 +120,16 @@ class DatasetConfig:
     def __post_init__(self) -> None:
         _require(
             self.train_split in ALLOWED_TRAIN_SPLITS,
-            "train_split must be one of 'train_small' or 'train_full'.",
+            "train_split must be one of 'train_small' or 'train_extended'.",
         )
         _require(
             self.valid_split in ALLOWED_VALID_SPLITS,
-            "valid_split must be one of 'valid_small' or 'valid_full'.",
+            "valid_split must be one of 'valid_small' or 'valid_extended'.",
         )
-        _require(self.test_split in ALLOWED_TEST_SPLITS, "test_split must be 'test'.")
+        _require(
+            self.test_split in ALLOWED_TEST_SPLITS,
+            "test_split must be one of 'test' or 'test_extended'.",
+        )
         _require_str("root_dir", self.root_dir)
 
     def to_dict(self) -> dict[str, Any]:
@@ -240,7 +243,7 @@ class ModelConfig:
     """xLSTM output reduction mode (final or mean)."""
     mlp_head_l2_norm: bool = True
     """Enable L2-normalized MLP-Mixer head logits."""
-    num_classes: int = 32
+    num_classes: int = 12
     """Number of output classes."""
 
     def __post_init__(self) -> None:
@@ -263,10 +266,7 @@ class ModelConfig:
             "xlstm_output_mode must be 'final' or 'mean'.",
         )
         _require_int("num_classes", self.num_classes)
-        _require(
-            2 <= self.num_classes <= 32,
-            "num_classes must be between 2 and 32.",
-        )
+        _require(2 <= self.num_classes <= 12, "num_classes must be between 2 and 12.")
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the model config."""
@@ -517,7 +517,7 @@ class EvaluationConfig:
     """Target prior for the unknown class under sampling control."""
     silence_prior: float = 0.15
     """Target prior for the silence class under sampling control."""
-    command_prior: float = 0.02
+    command_prior: float = 0.06
     """Target prior for each command class under sampling control."""
     warmup_iterations: int = 50
     """Warmup iterations excluded from inference-latency timing."""

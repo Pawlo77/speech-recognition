@@ -15,6 +15,7 @@ from torch import Tensor, nn
 from torch.nn import functional as nn_functional
 
 from ..config import ExperimentConfig
+from ..dataset.unknown import UnknownSampleGenerationMixin
 from ..features.extractors import WaveformLoader, build_feature_extractor
 from ..models.registry import build_model_adapter
 from ..training import TrainingEngine
@@ -30,37 +31,29 @@ COMMAND_LABELS: tuple[str, ...] = (
     "off",
     "stop",
     "go",
-    "zero",
-    "one",
-    "two",
-    "three",
-    "four",
-    "five",
-    "six",
-    "seven",
-    "eight",
-    "nine",
-    "bed",
-    "bird",
-    "cat",
-    "dog",
-    "happy",
-    "house",
-    "marvin",
-    "sheila",
-    "tree",
-    "wow",
 )
-"""30 core command labels in the Kaggle speech-commands dataset."""
+"""10 command labels used in the 12-class formulation."""
 
 NON_COMMAND_LABELS: tuple[str, str] = ("__unknown__", "__silence__")
 """Special non-command labels for unknown and silence classes."""
 
 ALL_LABELS: tuple[str, ...] = (*COMMAND_LABELS, *NON_COMMAND_LABELS)
-"""All 32 labels (core commands + non-commands)."""
+"""All 12 labels (10 commands + unknown + silence)."""
 
 GATE_COMMAND_LABEL: str = "__command__"
 GATE_NON_COMMAND_LABEL: str = "__non_command__"
+
+
+class _RuntimeUnknownBlender(UnknownSampleGenerationMixin):
+    """Runtime adapter for reusing dataset unknown-sample blending logic."""
+
+    UNKNOWN_LABEL = "__unknown__"
+
+    def __init__(self, dataset_root: Path, seed: int, target_unknown_count: int) -> None:
+        self.dataset_root = dataset_root
+        self.seed = seed
+        self.unknown_label_samples_size = target_unknown_count
+        self._unknown_source_profile_cache: dict[str, tuple[str, float]] = {}
 
 
 def _set_reproducibility(seed: int, deterministic: bool) -> None:
@@ -109,19 +102,23 @@ def _split_filename(split_name: str) -> str:
         return "small_training_list.txt"
     if split_name == "valid_small":
         return "small_validation_list.txt"
-    if split_name == "train_full":
-        return "training_list.txt"
-    if split_name == "valid_full":
-        return "validation_list.txt"
+    if split_name == "train_extended":
+        return "extended_training_list.txt"
+    if split_name == "valid_extended":
+        return "extended_validation_list.txt"
     if split_name == "test":
         return "testing_list.txt"
+    if split_name == "test_extended":
+        return "extended_testing_list.txt"
     raise ValueError(f"Unsupported split '{split_name}'.")
 
 
 def _normalize_label(label: str) -> str:
     if label == "_background_noise_":
         return "__silence__"
-    return label
+    if label in COMMAND_LABELS:
+        return label
+    return "__unknown__"
 
 
 def _load_split_records(dataset_root: Path, split_name: str) -> list[AudioRecord]:
@@ -263,6 +260,73 @@ def _sampling_weights(records: list[AudioRecord], config: ExperimentConfig) -> l
         class_count = max(1, counts[record.label])
         weights.append(priors[record.label] / class_count)
     return weights
+
+
+def _phase_four_silence_boost(counts: dict[str, int]) -> float:
+    """Compute silence boost so silence approaches mean command support."""
+
+    command_counts = [counts[label] for label in COMMAND_LABELS]
+    if not command_counts:
+        return 1.0
+    target_average = sum(command_counts) / len(command_counts)
+    silence_count = max(1, counts["__silence__"])
+    return max(1.0, target_average / silence_count)
+
+
+def _phase_four_weighted_sampling(records: list[AudioRecord]) -> list[float]:
+    """Build per-sample train weights with explicit silence up-weighting."""
+
+    counts: dict[str, int] = dict.fromkeys(ALL_LABELS, 0)
+    for record in records:
+        counts[record.label] += 1
+
+    silence_boost = _phase_four_silence_boost(counts)
+    weights: list[float] = []
+    for record in records:
+        base_weight = 1.0 / max(1, counts[record.label])
+        if record.label == "__silence__":
+            base_weight *= silence_boost
+        weights.append(base_weight)
+    return weights
+
+
+def _augment_unknown_records_for_phase_four(
+    dataset_root: Path,
+    records: list[AudioRecord],
+    seed: int,
+) -> list[AudioRecord]:
+    """Augment unknown samples using blending when unknown support is too low."""
+
+    counts: dict[str, int] = dict.fromkeys(ALL_LABELS, 0)
+    for record in records:
+        counts[record.label] += 1
+
+    command_average = round(sum(counts[label] for label in COMMAND_LABELS) / len(COMMAND_LABELS))
+    unknown_count = counts["__unknown__"]
+    if unknown_count >= command_average:
+        return records
+
+    blender = _RuntimeUnknownBlender(
+        dataset_root=dataset_root,
+        seed=seed,
+        target_unknown_count=command_average,
+    )
+    blender._create_unknown_label_samples()
+
+    existing_paths = {record.path.resolve() for record in records}
+    unknown_dir = dataset_root / "train" / "audio" / "__unknown__"
+    appended_records = records[:]
+    for path in sorted(unknown_dir.glob("*.wav")):
+        resolved = path.resolve()
+        if resolved in existing_paths:
+            continue
+        appended_records.append(AudioRecord(path=resolved, label="__unknown__"))
+        existing_paths.add(resolved)
+        unknown_count += 1
+        if unknown_count >= command_average:
+            break
+
+    return appended_records
 
 
 def _loss_weights(
@@ -423,7 +487,7 @@ def _build_run_dir(config: ExperimentConfig, output_dir: Path, run_name: str) ->
 
 
 class SharedTwoHeadLoss(nn.Module):
-    """Loss for shared-backbone two-head training (30 command + 2 non-command)."""
+    """Loss for shared-backbone two-head training (10 command + 2 non-command)."""
 
     def forward(self, logits: Tensor, targets: Tensor) -> Tensor:  # type: ignore[override]
         command_mask = targets < len(COMMAND_LABELS)
@@ -481,7 +545,7 @@ def _compose_two_stage_probs(
     command_probs: list[list[float]],
     non_command_probs: list[list[float]],
 ) -> list[list[float]]:
-    """Compose 32-class probabilities from gate/command/non-command heads."""
+    """Compose 12-class probabilities from gate/command/non-command heads."""
 
     gate = np.array(gate_probs, dtype=np.float32)
     command = np.array(command_probs, dtype=np.float32)
@@ -548,6 +612,13 @@ def _execute_two_stage(
     if not train_records or not val_records or not eval_records:
         raise RuntimeError("Two-stage strategy requires non-empty train/valid/eval splits.")
 
+    if config.phase.phase == "phase_4":
+        train_records = _augment_unknown_records_for_phase_four(
+            dataset_root,
+            train_records,
+            config.seed,
+        )
+
     command_train_records = [record for record in train_records if record.label in COMMAND_LABELS]
     command_val_records = [record for record in val_records if record.label in COMMAND_LABELS]
     non_command_train_records = [
@@ -584,7 +655,13 @@ def _execute_two_stage(
         seed=config.seed,
         waveform_loader=waveform_loader,
         feature_extractor=feature_extractor,
-        shuffle=True,
+        shuffle=False,
+        sample_weights=(
+            _phase_four_weighted_sampling(train_records)
+            if config.phase.phase == "phase_4"
+            else None
+        ),
+        sampled_count=len(train_records),
     )
     gate_val_loader = FeatureBatchLoader(
         val_records,
@@ -640,7 +717,13 @@ def _execute_two_stage(
         seed=config.seed,
         waveform_loader=waveform_loader,
         feature_extractor=feature_extractor,
-        shuffle=True,
+        shuffle=False,
+        sample_weights=(
+            _phase_four_weighted_sampling(non_command_train_records)
+            if config.phase.phase == "phase_4"
+            else None
+        ),
+        sampled_count=len(non_command_train_records),
     )
     non_command_val_loader = FeatureBatchLoader(
         non_command_val_records,
@@ -817,6 +900,13 @@ def _execute_shared_two_head(
     if not train_records or not val_records or not eval_records:
         raise RuntimeError("Shared-two-head strategy requires non-empty train/valid/eval splits.")
 
+    if config.phase.phase == "phase_4":
+        train_records = _augment_unknown_records_for_phase_four(
+            dataset_root,
+            train_records,
+            config.seed,
+        )
+
     label_to_idx = {label: index for index, label in enumerate(ALL_LABELS)}
     run_dir = _build_run_dir(config, output_dir, run_name)
     waveform_loader = WaveformLoader()
@@ -829,7 +919,13 @@ def _execute_shared_two_head(
         seed=config.seed,
         waveform_loader=waveform_loader,
         feature_extractor=feature_extractor,
-        shuffle=True,
+        shuffle=False,
+        sample_weights=(
+            _phase_four_weighted_sampling(train_records)
+            if config.phase.phase == "phase_4"
+            else None
+        ),
+        sampled_count=len(train_records),
     )
     val_loader = FeatureBatchLoader(
         val_records,
@@ -973,6 +1069,13 @@ def execute_single_train(
     if not train_records or not val_records:
         raise RuntimeError("Training and validation splits must be non-empty.")
 
+    if config.phase.phase == "phase_4":
+        train_records = _augment_unknown_records_for_phase_four(
+            dataset_root,
+            train_records,
+            config.seed,
+        )
+
     label_to_idx = {label: index for index, label in enumerate(ALL_LABELS)}
     run_dir = _build_run_dir(config, output_dir, run_name)
 
@@ -980,8 +1083,18 @@ def execute_single_train(
     feature_extractor = build_feature_extractor(config.features)
     train_weights = None
     loss_fn: nn.Module = nn.CrossEntropyLoss()
+    phase_four_weights = (
+        _phase_four_weighted_sampling(train_records) if config.phase.phase == "phase_4" else None
+    )
     if config.evaluation.strategy == "sampling_control":
         train_weights = _sampling_weights(train_records, config)
+        if phase_four_weights is not None:
+            train_weights = [
+                base * silence
+                for base, silence in zip(train_weights, phase_four_weights, strict=True)
+            ]
+    elif phase_four_weights is not None:
+        train_weights = phase_four_weights
     if config.evaluation.strategy == "loss_reweighting":
         class_weights = _loss_weights(train_records, config, label_to_idx)
         loss_fn = nn.CrossEntropyLoss(weight=class_weights)

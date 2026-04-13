@@ -92,10 +92,12 @@ class UnknownSampleGenerationMixin:
         samples_to_create = self.unknown_label_samples_size - existing_unknown_samples
 
         samples_by_label: dict[str, list[Path]] = {}
+        padded_dir_name = getattr(self, "PADDED_AUDIO_DIR", "__padded_1sec__")
         for label_dir in (self.dataset_root / "train" / "audio").iterdir():
             if label_dir.is_dir() and label_dir.name not in (
                 "_background_noise_",
                 self.UNKNOWN_LABEL,
+                padded_dir_name,
             ):
                 samples_by_label[label_dir.name] = sorted(label_dir.glob("*.wav"))
 

@@ -8,8 +8,8 @@ from torch import Tensor, nn
 
 from ..config import ModelConfig
 
-NUM_KAGGLE_CLASSES: Final[int] = 32
-"""Number of classes in the Kaggle speech-command label space."""
+NUM_KAGGLE_CLASSES: Final[int] = 12
+"""Number of classes in the 12-class KWS label space."""
 
 DEFAULT_TARGET_FRAMES: Final[int] = 101
 """Temporal size for a 1-second baseline STFT-like feature tensor."""

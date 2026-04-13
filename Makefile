@@ -7,7 +7,7 @@ export PYTHONPATH=.
 export PYTORCH_ENABLE_MPS_FALLBACK=1
 export OMP_NUM_THREADS=1
 
-.PHONY: help install clean test pre-commit pre-commit-all phase-1 phase-2 phase-3 phase-4 full-pipeline mlflow
+.PHONY: help install clean test pre-commit pre-commit-all datasets phase-1 phase-2 phase-3 phase-4 full-pipeline mlflow
 
 ############################
 # Repo Maintenance Targets #
@@ -21,6 +21,7 @@ help:
 	@echo "  make test                   - Run tests"
 	@echo "  make pre-commit             - Run pre-commit checks on changed files"
 	@echo "  make pre-commit-all         - Run pre-commit checks on all files"
+	@echo "  make datasets               - Download/build all dataset variants (default, small, extended)"
 	@echo "  make phase-1                - Run phase 1 orchestration"
 	@echo "  make phase-2                - Run phase 2 orchestration"
 	@echo "  make phase-3                - Run phase 3 orchestration"
@@ -49,6 +50,10 @@ pre-commit:
 # pre-commit checks (linting, formatting, type checking)
 pre-commit-all:
 	uv run pre-commit run --all-files
+
+# Download/build all dataset variants used by the project.
+datasets:
+	uv run python -c "from speech_recognition import SpeechCommandsDataset; SpeechCommandsDataset(auto_download=True, only_1sec_samples=True, use_smaller_dataset=False, use_extended_dataset=False); SpeechCommandsDataset(auto_download=True, only_1sec_samples=True, use_smaller_dataset=True, use_extended_dataset=False); SpeechCommandsDataset(auto_download=True, only_1sec_samples=True, use_smaller_dataset=False, use_extended_dataset=True)"
 
 #########################
 # Orchestration Targets #

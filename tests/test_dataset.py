@@ -227,3 +227,54 @@ def test_create_unknown_label_samples_does_not_reuse_source_pair(
         "no",
         "up",
     }
+
+
+def test_collect_labeled_samples_maps_to_12_class_taxonomy(tmp_path: Path) -> None:
+    ds = object.__new__(SpeechCommandsDataset)
+    ds.dataset_root = tmp_path / SpeechCommandsDataset.KAGGLE_SLUG
+    train_audio = ds.dataset_root / "train" / "audio"
+    (train_audio / "yes").mkdir(parents=True, exist_ok=True)
+    (train_audio / "cat").mkdir(parents=True, exist_ok=True)
+    (train_audio / "_background_noise_").mkdir(parents=True, exist_ok=True)
+
+    for wav_path in (
+        train_audio / "yes" / "a.wav",
+        train_audio / "cat" / "b.wav",
+        train_audio / "_background_noise_" / "c.wav",
+    ):
+        wav_path.write_bytes(b"placeholder")
+
+    samples = ds._collect_labeled_samples(train_audio)
+    labels = {sample.filename: sample.label for sample in samples}
+
+    assert labels["a.wav"] == "yes"
+    assert labels["b.wav"] == SpeechCommandsDataset.UNKNOWN_LABEL
+    assert labels["c.wav"] == SpeechCommandsDataset.SILENCE_LABEL
+
+
+def test_unknown_origin_csv_is_written_for_merged_labels(tmp_path: Path) -> None:
+    ds = object.__new__(SpeechCommandsDataset)
+    ds.dataset_root = tmp_path / SpeechCommandsDataset.KAGGLE_SLUG
+    train_audio = ds.dataset_root / "train" / "audio"
+    (train_audio / "yes").mkdir(parents=True, exist_ok=True)
+    (train_audio / "cat").mkdir(parents=True, exist_ok=True)
+    (train_audio / "tree").mkdir(parents=True, exist_ok=True)
+    (train_audio / "_background_noise_").mkdir(parents=True, exist_ok=True)
+    (train_audio / "__unknown__").mkdir(parents=True, exist_ok=True)
+
+    (train_audio / "yes" / "a.wav").write_bytes(b"ok")
+    (train_audio / "cat" / "b.wav").write_bytes(b"ok")
+    (train_audio / "tree" / "c.wav").write_bytes(b"ok")
+    (train_audio / "_background_noise_" / "d.wav").write_bytes(b"ok")
+    (train_audio / "__unknown__" / "e.wav").write_bytes(b"ok")
+
+    ds._write_unknown_origin_map()
+
+    csv_path = ds.dataset_root / SpeechCommandsDataset.UNKNOWN_ORIGIN_CSV
+    lines = csv_path.read_text(encoding="utf-8").splitlines()
+
+    assert lines[0] == "relative_path,original_label,merged_label"
+    assert "cat/b.wav,cat,__unknown__" in lines
+    assert "tree/c.wav,tree,__unknown__" in lines
+    assert all(not line.startswith("yes/") for line in lines[1:])
+    assert all(not line.startswith("_background_noise_/") for line in lines[1:])

@@ -4,7 +4,7 @@ This repository implements a controlled keyword-spotting pipeline for the Kaggle
 
 ## Scope
 
-- Task: 32-class single-word classification over the Kaggle label space.
+- Task: 12-class single-word classification: 10 target commands + `__unknown__` + `__silence__`.
 - Input: 1-second audio clips at 16 kHz, with observed outliers ranging from 0.37 to 95.18 seconds.
 - Core focus: feature ablation, architecture comparison, non-command handling, resumable training, and held-out evaluation.
 
@@ -31,7 +31,15 @@ This ensures all subprocesses inherit the same Python import path, MPS fallback 
 
 ## Dataset and Synthetic Class Construction
 
-The Kaggle corpus is not perfectly uniform. While most clips are approximately one second long, the dataset also contains short and long anomalies. The preprocessing stack therefore pads or truncates waveforms to a one-second model input while preserving the original clips for synthesis and filtering.
+The Kaggle corpus is not perfectly uniform. While most clips are approximately one second long, the dataset also contains short and long anomalies. The project now uses a strict 12-class taxonomy:
+
+- Target commands: `yes`, `no`, `up`, `down`, `left`, `right`, `on`, `off`, `stop`, `go`.
+- `__silence__`: mapped from `_background_noise_`.
+- `__unknown__`: every other spoken label merged into one class.
+
+Before merging, preprocessing automatically writes `train/split_lists/unknown_origin_labels.csv`, which stores the mapping from merged unknown samples back to their original labels.
+
+For duration handling, short clips are never dropped. In dataset preprocessing mode, clips shorter than 1 second are zero-padded to exactly 1 second; longer clips are truncated at feature-loading time.
 
 `__unknown__` samples are generated only from command-class audio. The synthesis pipeline is deterministic at the source-file level and follows these steps:
 
@@ -42,7 +50,7 @@ The Kaggle corpus is not perfectly uniform. While most clips are approximately o
 - Blend the clips with dense short-frame overlap across the full 1-second window.
 - Reject candidates that fail the smoothness gate and regenerate until the target quota is met.
 
-This procedure avoids duplicating the same synthetic sample and keeps the non-command classes structurally separated from the original commands.
+This procedure avoids duplicating the same synthetic sample and keeps the non-command classes structurally separated from the target commands.
 
 ## Feature Extraction and Model Adapters
 
@@ -54,7 +62,7 @@ Feature extraction is implemented as composable PyTorch `nn.Module`s backed by `
 - PCEN: per-channel energy normalization.
 - Mel + SpecAugment: time and frequency masking.
 
-Model adapters accept `[B, 1, F, T]` tensors, normalize temporal length by padding or truncation, and expose profiling through `fvcore` using `FlopCountAnalysis` and `parameter_count`. The class count is fixed at 32.
+Model adapters accept `[B, 1, F, T]` tensors, normalize temporal length by padding or truncation, and expose profiling through `fvcore` using `FlopCountAnalysis` and `parameter_count`. The class count is fixed at 12.
 
 ## Phase Sweep Protocol
 
@@ -72,7 +80,7 @@ Every phase persists a local state file and a best-selection artifact before the
 Phase 4 freezes the three winning Phase 3 backbones and evaluates five non-command strategies across three fixed seeds:
 
 1. Flat multiclass baseline.
-2. Sampling control with target priors `p_unknown=0.25`, `p_silence=0.15`, and `p_cmd=0.02`.
+2. Sampling control with target priors `p_unknown=0.25`, `p_silence=0.15`, and `p_cmd=0.06`.
 3. Loss reweighting with weighted cross-entropy.
 4. Two-stage detector with a binary gate and a command classifier.
 5. Shared two-head model.
@@ -83,7 +91,7 @@ $$
 \mathrm{Macro-F1}_{\mathrm{NC}} = \frac{\mathrm{F1}_{\mathrm{unknown}} + \mathrm{F1}_{\mathrm{silence}}}{2}.
 $$
 
-Evaluation also tracks wall-clock inference latency after a 50-iteration warmup and records `inference_latency_ms_mean` alongside the F1 metrics.
+Evaluation also tracks wall-clock inference latency after a 50-iteration warmup and records `inference_latency_ms_mean` alongside the F1 metrics. In Phase 4, data loading additionally applies explicit silence up-weighting and conditionally augments `__unknown__` via blending when unknown support falls below the mean target-command support.
 
 ## Reproducibility Metadata
 
@@ -102,6 +110,7 @@ Run the main checks and pipeline entry points:
 
 ```bash
 uv sync
+make datasets
 make test
 make pre-commit-all
 

@@ -30,7 +30,7 @@ def _dummy_input(batch: int = 2, frames: int | None = None) -> torch.Tensor:
 
 
 @pytest.mark.parametrize("family", _families())
-def test_model_registry_forward_output_shape_is_batch_by_32(family: str) -> None:
+def test_model_registry_forward_output_shape_is_batch_by_class_count(family: str) -> None:
     registry = ModelRegistry()
     adapter = registry.create(family=family, num_classes=NUM_KAGGLE_CLASSES, pretrained=False)
 
