@@ -156,6 +156,7 @@ class PhaseTwoTrialSpec:
             optimizer=optimizer,
             scheduler=scheduler,
             phase=phase_config,
+            seed=self.seed,
         )
 
 

@@ -75,6 +75,22 @@ def test_phase_three_command_routes_to_sweep_runner(tmp_path: Path, monkeypatch)
     assert exit_code == 0
 
 
+def test_phase_four_command_routes_to_sweep_runner(tmp_path: Path, monkeypatch) -> None:
+    class FakePhaseFourRunner:
+        def __init__(self, output_dir, base_config=None) -> None:
+            self.output_dir = output_dir
+            self.base_config = base_config
+
+        def execute(self):
+            return {"phase": "phase-4", "output_dir": str(self.output_dir)}
+
+    monkeypatch.setattr("speech_recognition.cli.PhaseFourSweepRunner", FakePhaseFourRunner)
+
+    exit_code = main(["phase-4", "--output-dir", str(tmp_path / "runs")])
+
+    assert exit_code == 0
+
+
 def test_cli_merges_config_file_and_cli_overrides(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(_configured_experiment().to_dict()), encoding="utf-8")

@@ -159,6 +159,7 @@ class PhaseThreeTrialSpec:
             optimizer=optimizer,
             scheduler=scheduler,
             phase=phase_config,
+            seed=self.seed,
         )
 
     def _build_model_config(self, base_model: ModelConfig) -> ModelConfig:

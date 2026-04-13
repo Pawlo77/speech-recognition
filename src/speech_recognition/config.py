@@ -35,6 +35,14 @@ ALLOWED_SCHEDULERS: set[str] = {"cosine_annealing_warmup", "reduce_on_plateau"}
 """Allowed learning-rate scheduler identifiers."""
 ALLOWED_PHASES: set[str] = {"phase_1", "phase_2", "phase_3", "phase_4"}
 """Allowed phase identifiers for the experiment funnel."""
+ALLOWED_EVALUATION_STRATEGIES: set[str] = {
+    "flat_multiclass",
+    "sampling_control",
+    "loss_reweighting",
+    "two_stage_detector",
+    "shared_two_head",
+}
+"""Allowed final held-out evaluation strategies."""
 
 
 def _require(condition: bool, message: str) -> None:
@@ -463,6 +471,81 @@ class MLflowTrackingConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class EvaluationConfig:
+    """Final held-out evaluation strategy configuration."""
+
+    strategy: str = "flat_multiclass"
+    """Selected non-command handling strategy."""
+    backbone_ids: tuple[str, ...] = ()
+    """Frozen phase-3 backbone identifiers used for evaluation."""
+    ensemble_members: tuple[str, ...] = ()
+    """Backbone identifiers used in the current single-model or ensemble trial."""
+    unknown_prior: float = 0.25
+    """Target prior for the unknown class under sampling control."""
+    silence_prior: float = 0.15
+    """Target prior for the silence class under sampling control."""
+    command_prior: float = 0.02
+    """Target prior for each command class under sampling control."""
+    warmup_iterations: int = 50
+    """Warmup iterations excluded from inference-latency timing."""
+    max_core_command_f1_drop: float = 0.01
+    """Maximum tolerated core-command macro-F1 drop relative to the Phase 3 baseline."""
+
+    def __post_init__(self) -> None:
+        _require(
+            self.strategy in ALLOWED_EVALUATION_STRATEGIES,
+            f"strategy must be one of {sorted(ALLOWED_EVALUATION_STRATEGIES)}.",
+        )
+        _require(isinstance(self.backbone_ids, tuple), "backbone_ids must be a tuple.")
+        _require(isinstance(self.ensemble_members, tuple), "ensemble_members must be a tuple.")
+        _require_float("unknown_prior", self.unknown_prior, minimum=0.0)
+        _require_float("silence_prior", self.silence_prior, minimum=0.0)
+        _require_float("command_prior", self.command_prior, minimum=0.0)
+        _require_int("warmup_iterations", self.warmup_iterations, minimum=0)
+        _require_float("max_core_command_f1_drop", self.max_core_command_f1_drop, minimum=0.0)
+        if self.backbone_ids:
+            _require(
+                len(set(self.backbone_ids)) == len(self.backbone_ids),
+                "backbone_ids must not contain duplicates.",
+            )
+        if self.ensemble_members:
+            known_backbone_ids = self.backbone_ids or self.ensemble_members
+            _require(
+                set(self.ensemble_members).issubset(set(known_backbone_ids)),
+                "ensemble_members must reference known backbone ids.",
+            )
+        _require(
+            0.0 <= self.unknown_prior <= 1.0,
+            "unknown_prior must be between 0 and 1.",
+        )
+        _require(
+            0.0 <= self.silence_prior <= 1.0,
+            "silence_prior must be between 0 and 1.",
+        )
+        _require(
+            0.0 <= self.command_prior <= 1.0,
+            "command_prior must be between 0 and 1.",
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation of the evaluation config."""
+
+        return _serialize(self)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> Self:
+        """Build an evaluation config from a mapping."""
+
+        mapping = _extract_mapping(data, name="EvaluationConfig")
+        kwargs = dict(mapping)
+        if "backbone_ids" in kwargs:
+            kwargs["backbone_ids"] = tuple(kwargs["backbone_ids"])
+        if "ensemble_members" in kwargs:
+            kwargs["ensemble_members"] = tuple(kwargs["ensemble_members"])
+        return cls(**kwargs)
+
+
+@dataclass(frozen=True, slots=True)
 class PhaseSelectionConfig:
     """Select which experimental phase to execute."""
 
@@ -520,12 +603,17 @@ class ExperimentConfig:
     """Checkpoint configuration."""
     mlflow: MLflowTrackingConfig = field(default_factory=MLflowTrackingConfig)
     """MLflow tracking configuration."""
+    evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
+    """Final held-out evaluation configuration."""
     phase: PhaseSelectionConfig = field(default_factory=PhaseSelectionConfig)
     """Phase selection configuration."""
+    seed: int = DEFAULT_SEEDS[0]
+    """Active reproducibility seed for the current run."""
     seeds: tuple[int, int, int] = DEFAULT_SEEDS
     """Fixed reproducibility seeds."""
 
     def __post_init__(self) -> None:
+        _require(self.seed in DEFAULT_SEEDS, f"seed must be one of {DEFAULT_SEEDS}.")
         _require(self.seeds == DEFAULT_SEEDS, "seeds must remain fixed at (0, 42, 2003).")
         _require(
             self.scheduler.total_epochs == self.training.epochs,
@@ -551,6 +639,7 @@ class ExperimentConfig:
         kwargs["training"] = TrainingControlConfig.from_dict(kwargs["training"])
         kwargs["checkpointing"] = CheckpointConfig.from_dict(kwargs["checkpointing"])
         kwargs["mlflow"] = MLflowTrackingConfig.from_dict(kwargs["mlflow"])
+        kwargs["evaluation"] = EvaluationConfig.from_dict(kwargs["evaluation"])
         kwargs["phase"] = PhaseSelectionConfig.from_dict(kwargs["phase"])
         if "seeds" in kwargs:
             kwargs["seeds"] = tuple(kwargs["seeds"])
@@ -562,6 +651,7 @@ __all__ = [
     "CheckpointConfig",
     "ConfigValidationError",
     "DatasetConfig",
+    "EvaluationConfig",
     "ExperimentConfig",
     "FeaturePipelineConfig",
     "MLflowTrackingConfig",

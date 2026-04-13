@@ -6,6 +6,7 @@ from speech_recognition.config import (
     CheckpointConfig,
     ConfigValidationError,
     DatasetConfig,
+    EvaluationConfig,
     ExperimentConfig,
     FeaturePipelineConfig,
     MLflowTrackingConfig,
@@ -28,7 +29,9 @@ def test_experiment_config_defaults_are_explicit() -> None:
     assert config.training == TrainingControlConfig()
     assert config.checkpointing == CheckpointConfig()
     assert config.mlflow == MLflowTrackingConfig()
+    assert config.evaluation == EvaluationConfig()
     assert config.phase == PhaseSelectionConfig()
+    assert config.seed == 0
     assert config.seeds == (0, 42, 2003)
 
 
@@ -42,6 +45,8 @@ def test_experiment_config_defaults_are_explicit() -> None:
         (lambda: OptimizerConfig(name="sgd"), "adamw"),
         (lambda: SchedulerConfig(warmup_epochs=60, total_epochs=60), "warmup_epochs"),
         (lambda: CheckpointConfig(save_best=False, save_last=False), "checkpoint"),
+        (lambda: EvaluationConfig(strategy="bogus"), "strategy"),
+        (lambda: ExperimentConfig(seed=7), "seed"),
         (lambda: PhaseSelectionConfig(phase="phase_5"), "phase"),
         (lambda: ExperimentConfig(seeds=(0, 42, 42)), "seeds"),
     ],
@@ -55,6 +60,11 @@ def test_experiment_config_round_trip_serializes_to_json() -> None:
     config = ExperimentConfig(
         features=FeaturePipelineConfig(name="mfcc", n_fft=1024, hop_length=160, n_mfcc=40),
         model=ModelConfig(family="xlstm", dropout=0.2, pretrained=False),
+        evaluation=EvaluationConfig(
+            strategy="sampling_control",
+            backbone_ids=("backbone_a", "backbone_b", "backbone_c"),
+            ensemble_members=("backbone_a", "backbone_b"),
+        ),
         training=TrainingControlConfig(epochs=60, use_mixed_precision=True),
         phase=PhaseSelectionConfig(phase="phase_3"),
         checkpointing=CheckpointConfig(keep_last_n=3),

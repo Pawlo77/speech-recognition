@@ -26,6 +26,7 @@ help:
 	@echo "  make phase-3                - Run phase 3 orchestration"
 	@echo "  make phase-4                - Run phase 4 orchestration"
 	@echo "  make full-pipeline          - Run the full pipeline"
+	@echo "  make mlflow                 - Launch MLflow UI for local runs"
 
 # install dependencies and pre-commit hooks
 install:
@@ -49,20 +50,34 @@ pre-commit:
 pre-commit-all:
 	uv run pre-commit run --all-files
 
+#########################
+# Orchestration Targets #
+#########################
+
+# Execute phase 1
 phase-1:
 	uv run speech-recognition phase-1 --output-dir outputs --run-name default
 
+# Execute phase 2
 phase-2:
 	uv run speech-recognition phase-2 --output-dir outputs --run-name default
 
+# Execute phase 3
 phase-3:
 	uv run speech-recognition phase-3 --output-dir outputs --run-name default
 
+# Execute phase 4
 phase-4:
 	uv run speech-recognition phase-4 --output-dir outputs --run-name default
 
+# Execute the full pipeline
 full-pipeline:
 	uv run speech-recognition run --output-dir outputs --run-name default
 
+#################
+# Other Targets #
+#################
+
+# Launch MLflow UI for local runs
 mlflow:
 	uv run mlflow ui --backend-store-uri .mlruns

@@ -161,6 +161,7 @@ class PhaseOneTrialSpec:
             features=features,
             model=model,
             phase=phase_config,
+            seed=self.seed,
         )
 
 

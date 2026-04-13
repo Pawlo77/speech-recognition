@@ -15,6 +15,7 @@ from speech_recognition.orchestration.services import (
     PhaseThreeService,
     build_isolated_subprocess_command,
     build_isolated_subprocess_env,
+    run_isolated_subprocess,
 )
 from speech_recognition.orchestration.state import PHASE_ORDER, PipelineStateStore
 
@@ -86,3 +87,33 @@ def test_build_isolated_subprocess_env_injects_required_keys() -> None:
 
     for key, value in ISOLATED_CHILD_ENV.items():
         assert env[key] == value
+
+
+def test_run_isolated_subprocess_inherits_required_env_vars(tmp_path: Path, monkeypatch) -> None:
+    captured = {}
+
+    def fake_run(command, *, check, env, text, capture_output):
+        captured["command"] = list(command)
+        captured["check"] = check
+        captured["env"] = dict(env)
+        captured["text"] = text
+        captured["capture_output"] = capture_output
+
+        class _CompletedProcess:
+            returncode = 0
+
+        return _CompletedProcess()
+
+    monkeypatch.setattr("speech_recognition.orchestration.services.subprocess.run", fake_run)
+
+    result = run_isolated_subprocess(
+        command="run-single-train",
+        config_path=tmp_path / "trial.json",
+        output_dir=tmp_path / "outputs",
+        run_name="demo",
+    )
+
+    assert result.returncode == 0
+    assert captured["command"][3] == "run-single-train"
+    for key, value in ISOLATED_CHILD_ENV.items():
+        assert captured["env"][key] == value

@@ -162,6 +162,7 @@ def test_phase_three_sweep_skips_completed_trials_and_loads_previous_phase_artif
         assert config_payload["optimizer"]["weight_decay"] == 0.01
         assert config_payload["scheduler"]["name"] == "cosine_annealing_warmup"
         assert config_payload["model"]["family"] == "convnext"
+        assert config_payload["seed"] == pending_trial.seed
 
         child_state_path = output_dir / "phase_3" / "runs" / run_name / "state.json"
         child_state_path.parent.mkdir(parents=True, exist_ok=True)

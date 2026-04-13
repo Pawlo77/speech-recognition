@@ -184,6 +184,8 @@ class PhaseFourService(PhaseService):
             "model": upstream["phase-3"]["model"],
             "checkpointing": context.config.checkpointing.to_dict(),
             "mlflow": context.config.mlflow.to_dict(),
+            "evaluation": context.config.evaluation.to_dict(),
+            "frozen_backbones": context.config.evaluation.backbone_ids,
             "upstream": upstream,
             "final_status": "ready-for-evaluation",
         }

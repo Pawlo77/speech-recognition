@@ -91,6 +91,9 @@ def test_phase_one_sweep_skips_completed_trials_and_persists_best_feature(
         run_name = command[command.index("--run-name") + 1]
         child_state_path = output_dir / "phase_1" / "runs" / run_name / "state.json"
         child_state_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path = output_dir / "phase_1" / "runs" / run_name / "temp_config.json"
+        config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+        assert config_payload["seed"] == pending_trial.seed
         child_state_path.write_text(
             json.dumps(
                 {
