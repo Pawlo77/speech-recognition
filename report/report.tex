@@ -71,11 +71,34 @@ Before merging labels, we persist a metadata artifact \texttt{train/split\_lists
 
 Each synthetic sample is formed by blending $2$ or $3$ one-second clips. Before mixing, each source is mean-centered, RMS-normalized toward a shared target level, and lightly smoothed with a short delayed component to reduce abrupt local transients. The final mixture is then produced by dense short-frame overlap where all sources remain active throughout the full second with slowly varying weights, encouraging spectro-temporal continuity rather than hard segment boundaries.
 
-To avoid regenerating the same example, uniqueness is tracked at the source-file level (sorted source-path tuple), not at the class-combination level. After synthesis, each candidate is passed through an envelope-based smoothness gate (windowed RMS trajectory checks for abrupt jumps and deep internal valleys). Candidates that fail this gate are discarded and regenerated in a retry loop; only accepted candidates are written to the \texttt{\_\_unknown\_\_} directory. In Phase $4$, the runtime checks whether empirical unknown support falls below the mean per-command support and only then enables additional synthetic unknown generation. For the fixed extended splits in Table~\ref{tab:dataset_splits_12class}, this condition is not met.
+To avoid regenerating the same example, uniqueness is tracked at the source-file level (sorted source-path tuple), not at the class-combination level. After synthesis, each candidate is passed through an envelope-based smoothness gate (windowed RMS trajectory checks for abrupt jumps and deep internal valleys). Candidates that fail this gate are discarded and regenerated in a retry loop; only accepted candidates are written to the \texttt{\_\_unknown\_\_} directory. In Phase $4$, the runtime checks whether empirical unknown support falls below the mean per-command support and only then enables additional synthetic unknown generation. For the fixed extended splits in Table~\ref{tab:dataset_splits_12class}, this condition is not met. Exact distribution for the extended training set is shown in Figure~\ref{fig:extended_split_class_histogram}.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{../notebooks/plots/extended_split_class_histogram.png}
+    \caption{Class distribution in the extended training set.}
+    \label{fig:extended_split_class_histogram}
+\end{figure}
+
+\subsection{Audio analysis}
+In analyzing the raw audio data the focus is on understanding the raw waveforms and their spectral properties. Figure~\ref{fig:raw_wave_and_spectrogram} shows an example of a raw audio waveform and its corresponding spectrogram, illustrating the temporal and frequency characteristics of a typical command sample. The spectrogram reveals the energy distribution across frequencies over time, which is crucial for feature extraction strategies. Raw waveforms exhibit high variability in amplitude and temporal structure, while spectrograms provide a more stable representation that captures the essential characteristics of the audio signal. Observing raw waveforms of different classes (Appendix \ref{app:extra analysis}) reveals that amplitude patterns varies, however the main signal begins approximately after $0.4$ seconds.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{../notebooks/plots/spectrogram_example_yes.png}
+    \caption{Raw wave and spectrogram example from train set for "yes".}
+    \label{fig:raw_wave_and_spectrogram}
+\end{figure}
+
+Another factor to consider is the average spectral content across different command classes. Figure~\ref{fig:mean_fft_per_label_train} shows the mean FFT magnitude for each label in the training set, highlighting differences in frequency content between commands. Observation can be made that different commands have their own characteristic which can be exploited by the models to distinguish between them.
 
 
-% TODO: Insert a visual of the class distribution in the training set, highlighting the dominance of the \texttt{\_\_unknown\_\_} class.
-% TODO: Insert EDA visualizations of the raw audio waveforms, showing the diversity of temporal patterns across different command words. Keep entire section under 1.5 pages.
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{../notebooks/plots/mean_fft_per_label_train.png}
+    \caption{Mean FFT magnitude per label in the training set.}
+    \label{fig:mean_fft_per_label_train}
+\end{figure}
 
 \section{Experimental Design and MLOps Pipeline}
 \label{sec:phases}
@@ -139,14 +162,6 @@ Mel + SpecAugment & $1024$ & $160$ & $64$ ms & $10$ ms & $101$ & $128$ mels & $1
 \end{tabularx}
 \endgroup
 \end{table*}
-
-% TODO: replace it with our custom example, add here also other methods row by row and move this image below the description.
-\begin{figure}[htbp]
-\centering
-\includegraphics[width=0.95\linewidth]{figures/pytorch_melspec_nfft512.png}
-\caption{Top: original waveform. After it, row by row: Mel-Spectrogram, High Temporal Resolution Mel, MFCC, PCEN, and Mel + SpecAugment.}
-\label{fig:example_features}
-\end{figure}
 
 \subsection{Phases 2 \& 3: Architectural Bias and Optimization (Q2)}
 To isolate structural effects, we train all models entirely from random initialization. Rather than asking which pre-training source transfers best, this design evaluates which architecture learns most effectively from the supervision signal itself.
@@ -240,5 +255,29 @@ While this study establishes a strictly controlled baseline for evaluating KWS a
 
 \bibliographystyle{IEEEtran}
 \bibliography{mybib}
+
+\appendix
+\section{Additional Analyses and Visualizations}\label{app:extra_analysis}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth]{../notebooks/plots/spectrogram_example_down.png}
+    \caption{Raw wave and spectrogram example from train set for "down".}
+    \label{fig:raw_wave_and_spectrogram}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth]{../notebooks/plots/spectrogram_example_no.png}
+    \caption{Raw wave and spectrogram example from train set for "no".}
+    \label{fig:raw_wave_and_spectrogram}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth]{../notebooks/plots/spectrogram_example_up.png}
+    \caption{Raw wave and spectrogram example from train set for "up".}
+    \label{fig:raw_wave_and_spectrogram}
+\end{figure}
 
 \end{document}
