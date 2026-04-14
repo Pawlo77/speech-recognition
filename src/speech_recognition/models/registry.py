@@ -1,5 +1,6 @@
 """Model registry and adapters for keyword-spotting backbones."""
 
+import importlib
 from collections.abc import Callable
 from typing import Final, cast
 
@@ -18,206 +19,16 @@ DEFAULT_INPUT_BINS: Final[int] = 128
 """Default feature-bin count used by the feature extraction stack."""
 
 SOURCE_LIBRARY_BY_FAMILY: Final[dict[str, tuple[str, ...]]] = {
-    "ast": ("transformers", "timm"),
+    "ast": ("transformers",),
     "convnext": ("torchvision", "timm"),
     "ssamba": ("mamba-ssm",),
     "xlstm": ("xlstm",),
     "mlp_mixer": ("timm",),
 }
-"""Preferred external source libraries for each registry family."""
+"""Official source libraries for each registry family."""
 
-
-class TinyAstBackbone(nn.Module):
-    """Lightweight AST-like fallback module for spectrogram classification."""
-
-    def __init__(self, num_classes: int, in_chans: int = 1, embed_dim: int = 96) -> None:
-        super().__init__()
-        self.patch_embed = nn.Conv2d(in_chans, embed_dim, kernel_size=16, stride=8, bias=False)
-        self.norm = nn.BatchNorm2d(embed_dim)
-        self.act = nn.GELU()
-        self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.head = nn.Linear(embed_dim, num_classes)
-
-    def forward(self, inputs: Tensor) -> Tensor:
-        hidden = self.act(self.norm(self.patch_embed(inputs)))
-        pooled = self.pool(hidden).flatten(1)
-        return self.head(pooled)
-
-
-class TinyConvNeXtBackbone(nn.Module):
-    """Small ConvNeXt-style fallback with 1-channel stem support."""
-
-    def __init__(self, num_classes: int, in_chans: int = 1, hidden_dim: int = 64) -> None:
-        super().__init__()
-        self.stem = nn.Conv2d(in_chans, hidden_dim, kernel_size=4, stride=2, padding=1)
-        self.depthwise = nn.Conv2d(
-            hidden_dim,
-            hidden_dim,
-            kernel_size=7,
-            stride=1,
-            padding=3,
-            groups=hidden_dim,
-        )
-        self.pointwise = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1)
-        self.norm = nn.BatchNorm2d(hidden_dim)
-        self.act = nn.GELU()
-        self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.head = nn.Linear(hidden_dim, num_classes)
-
-    def forward(self, inputs: Tensor) -> Tensor:
-        hidden = self.act(self.norm(self.stem(inputs)))
-        hidden = self.act(self.norm(self.pointwise(self.depthwise(hidden))))
-        pooled = self.pool(hidden).flatten(1)
-        return self.head(pooled)
-
-
-class SSMambaFallbackBackbone(nn.Module):
-    """Fallback for SSAMBA using causal conv + linear state-space recurrence."""
-
-    def __init__(
-        self,
-        num_classes: int,
-        hidden_dim: int = 64,
-        pooling: str = "mean",
-        use_cls: bool = True,
-        stride_ms: int = 10,
-    ) -> None:
-        super().__init__()
-        self.pooling = pooling
-        self.use_cls = use_cls
-        self.stride_frames = 1 if stride_ms == 10 else 2
-        self.pre = nn.Conv1d(1, hidden_dim, kernel_size=3, padding=2)
-        self.state_a = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        self.state_b = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        self.gate = nn.Linear(hidden_dim, hidden_dim)
-        self.head = nn.Linear(hidden_dim, num_classes)
-
-    def forward(self, inputs: Tensor) -> Tensor:
-        sequence = inputs.mean(dim=2)
-        hidden = self.pre(sequence)[..., :-2]
-        if self.stride_frames > 1:
-            hidden = hidden[..., :: self.stride_frames]
-        hidden = hidden.transpose(1, 2)
-
-        state = torch.zeros(
-            hidden.size(0),
-            hidden.size(-1),
-            dtype=hidden.dtype,
-            device=hidden.device,
-        )
-        outputs: list[Tensor] = []
-        for step in range(hidden.size(1)):
-            token = hidden[:, step, :]
-            candidate = self.state_a(state) + self.state_b(token)
-            gate = torch.sigmoid(self.gate(token))
-            state = gate * torch.tanh(candidate) + (1.0 - gate) * state
-            outputs.append(state)
-
-        stacked = torch.stack(outputs, dim=1)
-        if self.use_cls:
-            pooled = stacked[:, 0, :]
-        elif self.pooling == "max":
-            pooled = stacked.max(dim=1).values
-        else:
-            pooled = stacked.mean(dim=1)
-        return self.head(pooled)
-
-
-class MatrixMemoryXLSTMFallback(nn.Module):
-    """Minimal matrix-memory xLSTM-style fallback with C_t in R^(d x d)."""
-
-    def __init__(
-        self,
-        num_classes: int,
-        memory_dim: int = 32,
-        state_reset: bool = True,
-        output_mode: str = "final",
-    ) -> None:
-        super().__init__()
-        self.memory_dim = memory_dim
-        self.state_reset = state_reset
-        self.output_mode = output_mode
-        self.input_proj = nn.Linear(1, memory_dim)
-        self.query_proj = nn.Linear(memory_dim, memory_dim)
-        self.key_proj = nn.Linear(memory_dim, memory_dim)
-        self.value_proj = nn.Linear(memory_dim, memory_dim)
-        self.forget_gate = nn.Linear(memory_dim, 1)
-        self.input_gate = nn.Linear(memory_dim, 1)
-        self.head = nn.Linear(memory_dim, num_classes)
-
-    def forward(self, inputs: Tensor) -> Tensor:
-        sequence = inputs.mean(dim=2).transpose(1, 2)
-        token_states = self.input_proj(sequence)
-
-        memory = torch.zeros(
-            token_states.size(0),
-            self.memory_dim,
-            self.memory_dim,
-            dtype=token_states.dtype,
-            device=token_states.device,
-        )
-        readouts: list[Tensor] = []
-        for step in range(token_states.size(1)):
-            token = token_states[:, step, :]
-            query = self.query_proj(token)
-            key = self.key_proj(token)
-            value = self.value_proj(token)
-
-            forget = torch.sigmoid(self.forget_gate(token)).unsqueeze(-1)
-            write = torch.sigmoid(self.input_gate(token)).unsqueeze(-1)
-            outer = torch.einsum("bi,bj->bij", key, value)
-            memory = forget * memory + write * outer
-
-            readout = torch.einsum("bij,bj->bi", memory, query)
-            readouts.append(readout)
-
-        stacked = torch.stack(readouts, dim=1)
-        if not self.state_reset:
-            memory = memory + 0.01
-        pooled = stacked[:, -1, :] if self.output_mode == "final" else stacked.mean(dim=1)
-        return self.head(pooled)
-
-
-class TinyMLPMixerBackbone(nn.Module):
-    """Compact MLP-Mixer fallback operating on spectrogram patches."""
-
-    def __init__(
-        self,
-        num_classes: int,
-        hidden_dim: int = 64,
-        patch_size: int = 8,
-        dropout: float = 0.0,
-        head_l2_norm: bool = True,
-    ) -> None:
-        super().__init__()
-        self.patch_size = patch_size
-        self.head_l2_norm = head_l2_norm
-        self.dropout = nn.Dropout(dropout)
-        self.patch_embed = nn.Conv2d(1, hidden_dim, kernel_size=patch_size, stride=patch_size)
-        self.token_mlp = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 2),
-            nn.GELU(),
-            nn.Linear(hidden_dim * 2, hidden_dim),
-        )
-        self.channel_mlp = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 2),
-            nn.GELU(),
-            nn.Linear(hidden_dim * 2, hidden_dim),
-        )
-        self.norm = nn.LayerNorm(hidden_dim)
-        self.head = nn.Linear(hidden_dim, num_classes)
-
-    def forward(self, inputs: Tensor) -> Tensor:
-        patches = self.patch_embed(inputs)
-        tokens = patches.flatten(2).transpose(1, 2)
-        tokens = tokens + self.token_mlp(tokens)
-        tokens = tokens + self.channel_mlp(tokens)
-        pooled = self.norm(tokens).mean(dim=1)
-        pooled = self.dropout(pooled)
-        logits = self.head(pooled)
-        if self.head_l2_norm:
-            logits = logits / logits.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-        return logits
+MLP_MIXER_MODEL_NAME: Final[str] = "gmixer_24_224"
+"""Official timm MLP-family model used for the mlp_mixer track."""
 
 
 class ASTBackboneWrapper(nn.Module):
@@ -283,6 +94,13 @@ class KWSModelAdapter(nn.Module):
         normalized = self.validate_input_shape(input_tensor)
         if self.family == "ast" and self.ast_uses_three_channels:
             normalized = normalized.repeat(1, 3, 1, 1)
+        if self.family == "mlp_mixer":
+            normalized = nn.functional.interpolate(
+                normalized,
+                size=(224, 224),
+                mode="bilinear",
+                align_corners=False,
+            )
 
         logits = self.backbone(normalized)
         if logits.dim() != 2 or logits.size(-1) != self.num_classes:
@@ -300,6 +118,13 @@ class KWSModelAdapter(nn.Module):
         normalized = self.validate_input_shape(input_tensor)
         if self.family == "ast" and self.ast_uses_three_channels:
             normalized = normalized.repeat(1, 3, 1, 1)
+        if self.family == "mlp_mixer":
+            normalized = nn.functional.interpolate(
+                normalized,
+                size=(224, 224),
+                mode="bilinear",
+                align_corners=False,
+            )
 
         self.backbone.eval()
         flops = int(FlopCountAnalysis(self.backbone, normalized).total())
@@ -386,36 +211,45 @@ def build_model_adapter(
     return ModelRegistry().create(model_config=effective_config, target_frames=target_frames)
 
 
+def _dependency_error(family: str, dependency: str, err: Exception) -> RuntimeError:
+    return RuntimeError(
+        f"Unable to build '{family}' from official backend '{dependency}'. "
+        f"Install/repair dependency '{dependency}'. Original error: {err!r}"
+    )
+
+
 def _build_ast_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool]:
-    """Build AST from ``transformers`` first, else use a lightweight fallback."""
+    """Build AST from Hugging Face Transformers only."""
 
     try:
-        from transformers import ASTConfig, ASTForAudioClassification
+        transformers_module = importlib.import_module("transformers")
+        ast_config_cls = transformers_module.ASTConfig
+        ast_for_audio_cls = transformers_module.ASTForAudioClassification
+    except Exception as err:
+        raise _dependency_error("ast", "transformers", err) from err
 
-        config = ASTConfig(
-            num_labels=model_config.num_classes,
-            hidden_dropout_prob=float(model_config.dropout),
-            attention_probs_dropout_prob=float(model_config.dropout),
-            max_length=DEFAULT_TARGET_FRAMES,
-            num_mel_bins=DEFAULT_INPUT_BINS,
-        )
-        return ASTBackboneWrapper(ASTForAudioClassification(config)), "transformers", False
-    except Exception:
-        in_chans = 3 if model_config.pretrained else 1
-        return (
-            TinyAstBackbone(num_classes=model_config.num_classes, in_chans=in_chans),
-            "fallback",
-            model_config.pretrained,
-        )
+    config = ast_config_cls(
+        num_labels=model_config.num_classes,
+        hidden_dropout_prob=float(model_config.dropout),
+        attention_probs_dropout_prob=float(model_config.dropout),
+        hidden_size=int(model_config.ast_hidden_size),
+        num_hidden_layers=int(model_config.ast_num_hidden_layers),
+        num_attention_heads=int(model_config.ast_num_attention_heads),
+        intermediate_size=int(model_config.ast_intermediate_size),
+        max_length=DEFAULT_TARGET_FRAMES,
+        num_mel_bins=DEFAULT_INPUT_BINS,
+    )
+    return ASTBackboneWrapper(ast_for_audio_cls(config)), "transformers", False
 
 
 def _build_convnext_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool]:
-    """Build ConvNeXt from torchvision/timm with a 1-channel stem when available."""
+    """Build ConvNeXt from torchvision first, then timm as official fallback."""
 
     try:
-        from torchvision.models import convnext_tiny
+        torchvision_models = importlib.import_module("torchvision.models")
+        convnext_tiny_fn = torchvision_models.convnext_tiny
 
-        model = convnext_tiny(weights=None, num_classes=model_config.num_classes)
+        model = convnext_tiny_fn(weights=None, num_classes=model_config.num_classes)
         original = model.features[0][0]
         model.features[0][0] = nn.Conv2d(
             1,
@@ -426,9 +260,9 @@ def _build_convnext_backbone(model_config: ModelConfig) -> tuple[nn.Module, str,
             bias=original.bias is not None,
         )
         return model, "torchvision", False
-    except Exception:
+    except Exception as torchvision_err:
         try:
-            import timm
+            timm = importlib.import_module("timm")
 
             model = timm.create_model(
                 "convnext_tiny",
@@ -438,96 +272,135 @@ def _build_convnext_backbone(model_config: ModelConfig) -> tuple[nn.Module, str,
                 drop_path_rate=float(model_config.stochastic_depth),
             )
             return model, "timm", False
-        except Exception:
-            return (
-                TinyConvNeXtBackbone(num_classes=model_config.num_classes, in_chans=1),
-                "fallback",
-                False,
-            )
+        except Exception as timm_err:
+            raise RuntimeError(
+                "Unable to build 'convnext' from official backends ('torchvision', 'timm'). "
+                f"torchvision error: {torchvision_err!r}; timm error: {timm_err!r}"
+            ) from timm_err
 
 
 def _build_ssamba_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool]:
-    """Build SSAMBA from mamba-ssm with Apple-silicon-safe fallback."""
+    """Build SSAMBA from mamba-ssm only."""
 
     try:
-        from mamba_ssm import Mamba
+        mamba_module = importlib.import_module("mamba_ssm")
+        mamba_cls = mamba_module.Mamba
+    except Exception as err:
+        raise _dependency_error("ssamba", "mamba-ssm", err) from err
 
-        class MambaHead(nn.Module):
-            """Thin wrapper around ``mamba_ssm.Mamba`` for logits output."""
+    class MambaHead(nn.Module):
+        """Thin wrapper around ``mamba_ssm.Mamba`` for logits output."""
 
-            def __init__(self) -> None:
-                super().__init__()
-                self.input_proj = nn.Linear(1, 64)
-                self.mamba = Mamba(d_model=64, d_state=16, d_conv=4, expand=2)
-                self.pooling = model_config.ssamba_pooling
-                self.use_cls = model_config.ssamba_use_cls
-                self.stride_frames = 1 if model_config.ssamba_stride_ms == 10 else 2
-                self.head = nn.Linear(64, model_config.num_classes)
+        def __init__(self) -> None:
+            super().__init__()
+            d_model = int(model_config.ssamba_d_model)
+            d_state = int(model_config.ssamba_d_state)
+            d_conv = int(model_config.ssamba_d_conv)
+            expand = int(model_config.ssamba_expand)
+            num_layers = int(model_config.ssamba_num_layers)
 
-            def forward(self, inputs: Tensor) -> Tensor:
-                sequence = inputs.mean(dim=2).transpose(1, 2).unsqueeze(-1)
-                hidden = self.input_proj(sequence)
-                if self.stride_frames > 1:
-                    hidden = hidden[:, :: self.stride_frames, :]
-                hidden = self.mamba(hidden)
-                if self.use_cls:
-                    pooled = hidden[:, 0, :]
-                elif self.pooling == "max":
-                    pooled = hidden.max(dim=1).values
-                else:
-                    pooled = hidden.mean(dim=1)
-                return self.head(pooled)
+            self.input_proj = nn.Linear(1, d_model)
+            self.layers = nn.ModuleList(
+                [
+                    mamba_cls(
+                        d_model=d_model,
+                        d_state=d_state,
+                        d_conv=d_conv,
+                        expand=expand,
+                    )
+                    for _ in range(num_layers)
+                ]
+            )
+            self.pooling = model_config.ssamba_pooling
+            self.use_cls = model_config.ssamba_use_cls
+            self.stride_frames = 1 if model_config.ssamba_stride_ms == 10 else 2
+            self.head = nn.Linear(d_model, model_config.num_classes)
 
-        return MambaHead(), "mamba-ssm", False
-    except Exception:
-        return (
-            SSMambaFallbackBackbone(
-                num_classes=model_config.num_classes,
-                pooling=model_config.ssamba_pooling,
-                use_cls=model_config.ssamba_use_cls,
-                stride_ms=model_config.ssamba_stride_ms,
-            ),
-            "fallback",
-            False,
-        )
+        def forward(self, inputs: Tensor) -> Tensor:
+            sequence = inputs.mean(dim=2).transpose(1, 2)
+            hidden = self.input_proj(sequence)
+            if self.stride_frames > 1:
+                hidden = hidden[:, :: self.stride_frames, :]
+            for layer in self.layers:
+                hidden = layer(hidden)
+            if self.use_cls:
+                pooled = hidden[:, 0, :]
+            elif self.pooling == "max":
+                pooled = hidden.max(dim=1).values
+            else:
+                pooled = hidden.mean(dim=1)
+            return self.head(pooled)
+
+    return MambaHead(), "mamba-ssm", False
 
 
 def _build_xlstm_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool]:
-    """Build xLSTM from external package when available, otherwise matrix-memory fallback."""
+    """Build xLSTM from the official ``xlstm`` package."""
 
-    return (
-        MatrixMemoryXLSTMFallback(
-            num_classes=model_config.num_classes,
-            memory_dim=model_config.xlstm_dim,
-            state_reset=model_config.xlstm_state_reset,
-            output_mode=model_config.xlstm_output_mode,
-        ),
-        "fallback",
-        False,
-    )
+    try:
+        xlstm_module = importlib.import_module("xlstm")
+        feed_forward_config_cls = xlstm_module.FeedForwardConfig
+        mlstm_block_config_cls = xlstm_module.mLSTMBlockConfig
+        mlstm_layer_config_cls = xlstm_module.mLSTMLayerConfig
+        slstm_block_config_cls = xlstm_module.sLSTMBlockConfig
+        slstm_layer_config_cls = xlstm_module.sLSTMLayerConfig
+        xlstm_block_stack_cls = xlstm_module.xLSTMBlockStack
+        xlstm_block_stack_config_cls = xlstm_module.xLSTMBlockStackConfig
+    except Exception as err:
+        raise _dependency_error("xlstm", "xlstm", err) from err
+
+    class XLSTMHead(nn.Module):
+        """Adapter that maps spectrogram sequences into xLSTM logits."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            dim = int(model_config.xlstm_dim)
+            num_blocks = int(model_config.xlstm_num_blocks)
+            slstm_at = [index for index in range(num_blocks) if index % 2 == 1]
+            config = xlstm_block_stack_config_cls(
+                mlstm_block=mlstm_block_config_cls(
+                    mlstm=mlstm_layer_config_cls(
+                        conv1d_kernel_size=4,
+                        qkv_proj_blocksize=4,
+                    )
+                ),
+                slstm_block=slstm_block_config_cls(
+                    slstm=slstm_layer_config_cls(backend="vanilla"),
+                    feedforward=feed_forward_config_cls(proj_factor=1.3, act_fn="gelu"),
+                ),
+                context_length=DEFAULT_TARGET_FRAMES,
+                num_blocks=num_blocks,
+                embedding_dim=dim,
+                slstm_at=slstm_at,
+            )
+            self.input_proj = nn.Linear(1, dim)
+            self.xlstm = xlstm_block_stack_cls(config)
+            self.output_mode = model_config.xlstm_output_mode
+            self.head = nn.Linear(dim, model_config.num_classes)
+
+        def forward(self, inputs: Tensor) -> Tensor:
+            sequence = inputs.mean(dim=2).transpose(1, 2)
+            hidden = self.input_proj(sequence)
+            hidden = self.xlstm(hidden)
+            pooled = hidden[:, -1, :] if self.output_mode == "final" else hidden.mean(dim=1)
+            return self.head(pooled)
+
+    return XLSTMHead(), "xlstm", False
 
 
 def _build_mlp_mixer_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool]:
-    """Build MLP-Mixer from timm when present, else use compact fallback."""
+    """Build MLP-Mixer from timm only."""
 
     try:
-        import timm
+        timm = importlib.import_module("timm")
+    except Exception as err:
+        raise _dependency_error("mlp_mixer", "timm", err) from err
 
-        model = timm.create_model(
-            "mixer_b16_224",
-            pretrained=model_config.pretrained,
-            in_chans=1,
-            num_classes=model_config.num_classes,
-            drop_rate=float(model_config.dropout),
-        )
-        return model, "timm", False
-    except Exception:
-        return (
-            TinyMLPMixerBackbone(
-                num_classes=model_config.num_classes,
-                dropout=model_config.dropout,
-                head_l2_norm=model_config.mlp_head_l2_norm,
-            ),
-            "fallback",
-            False,
-        )
+    model = timm.create_model(
+        MLP_MIXER_MODEL_NAME,
+        pretrained=model_config.pretrained,
+        in_chans=1,
+        num_classes=model_config.num_classes,
+        drop_rate=float(model_config.dropout),
+    )
+    return model, "timm", False

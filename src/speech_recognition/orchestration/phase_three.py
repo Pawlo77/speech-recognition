@@ -1,6 +1,8 @@
 """Phase-3 architecture comparison sweep orchestration."""
 
 import json
+import logging
+import os
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -8,6 +10,8 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from tqdm.auto import tqdm
 
 from ..config import DEFAULT_SEEDS, ExperimentConfig, ModelConfig
 from .phase_one import _atomic_write_json, _feature_pipeline_for_trial, _read_json, _serialize
@@ -44,7 +48,7 @@ PHASE_THREE_SSAMBA_CLS: tuple[bool, bool] = (True, False)
 PHASE_THREE_SSAMBA_STRIDES_MS: tuple[int, int] = (10, 5)
 """SSAMBA temporal stride values (ms) to sweep."""
 
-PHASE_THREE_XLSTM_DIMS: tuple[int, int] = (32, 64)
+PHASE_THREE_XLSTM_DIMS: tuple[int, int] = (768, 896)
 """xLSTM hidden/memory dimensions to sweep."""
 
 PHASE_THREE_XLSTM_STATE_RESETS: tuple[bool, bool] = (True, False)
@@ -58,6 +62,39 @@ PHASE_THREE_MLP_MIXER_DROPOUTS: tuple[float, float] = (0.0, 0.2)
 
 PHASE_THREE_MLP_MIXER_HEAD_L2_NORM: tuple[bool, bool] = (True, False)
 """MLP-Mixer L2-normalized head configurations to sweep."""
+
+_SWEEP_MAX_TRIALS_ENV = "SPEECH_SWEEP_MAX_TRIALS"
+_SWEEP_SEED_ENV = "SPEECH_SWEEP_SEED"
+
+
+def _apply_trial_cap(trials: tuple[Any, ...]) -> tuple[Any, ...]:
+    """Return a capped trial tuple when a smoke-limit env override is set."""
+
+    raw_limit = os.environ.get(_SWEEP_MAX_TRIALS_ENV)
+    if raw_limit in {None, ""}:
+        return trials
+    try:
+        limit = int(raw_limit)
+    except ValueError as exc:
+        raise ValueError(f"{_SWEEP_MAX_TRIALS_ENV} must be an integer.") from exc
+    if limit <= 0:
+        raise ValueError(f"{_SWEEP_MAX_TRIALS_ENV} must be greater than zero.")
+    return trials[:limit]
+
+
+def _sweep_seeds() -> tuple[int, ...]:
+    """Return default seeds or a single-seed override for smoke runs."""
+
+    raw_seed = os.environ.get(_SWEEP_SEED_ENV)
+    if raw_seed in {None, ""}:
+        return PHASE_THREE_SEEDS
+    try:
+        seed = int(raw_seed)
+    except ValueError as exc:
+        raise ValueError(f"{_SWEEP_SEED_ENV} must be an integer.") from exc
+    if seed not in PHASE_THREE_SEEDS:
+        raise ValueError(f"{_SWEEP_SEED_ENV} must be one of {PHASE_THREE_SEEDS}.")
+    return (seed,)
 
 
 def _phase_three_group_key(record: "PhaseThreeTrialRecord") -> tuple[str, str]:
@@ -219,7 +256,7 @@ def _phase_three_optimizer_config(optim_artifact: Mapping[str, Any]) -> dict[str
     }
 
 
-def build_phase_three_command(config_path: Path, run_name: str) -> list[str]:
+def build_phase_three_command(config_path: Path, run_name: str, output_dir: Path) -> list[str]:
     """Build the isolated subprocess command for one phase-3 trial."""
 
     return [
@@ -229,6 +266,8 @@ def build_phase_three_command(config_path: Path, run_name: str) -> list[str]:
         "run-single-train",
         "--config",
         str(config_path),
+        "--output-dir",
+        str(output_dir),
         "--run-name",
         run_name,
     ]
@@ -322,7 +361,7 @@ class PhaseThreeTrialSpec:
 def _build_ast_trials() -> tuple[PhaseThreeTrialSpec, ...]:
     trials: list[PhaseThreeTrialSpec] = []
     trial_index = 0
-    for seed in PHASE_THREE_SEEDS:
+    for seed in _sweep_seeds():
         for dropout in PHASE_THREE_AST_DROPOUTS:
             for head in PHASE_THREE_AST_HEADS:
                 for positional_embedding in PHASE_THREE_AST_POSITIONAL_EMBEDDINGS:
@@ -348,7 +387,7 @@ def _build_ast_trials() -> tuple[PhaseThreeTrialSpec, ...]:
 def _build_convnext_trials() -> tuple[PhaseThreeTrialSpec, ...]:
     trials: list[PhaseThreeTrialSpec] = []
     trial_index = 0
-    for seed in PHASE_THREE_SEEDS:
+    for seed in _sweep_seeds():
         for stochastic_depth in PHASE_THREE_CONVNEXT_STOCH_DEPTHS:
             for kernel_size in PHASE_THREE_CONVNEXT_KERNEL_SIZES:
                 trial_index += 1
@@ -372,7 +411,7 @@ def _build_convnext_trials() -> tuple[PhaseThreeTrialSpec, ...]:
 def _build_ssamba_trials() -> tuple[PhaseThreeTrialSpec, ...]:
     trials: list[PhaseThreeTrialSpec] = []
     trial_index = 0
-    for seed in PHASE_THREE_SEEDS:
+    for seed in _sweep_seeds():
         for pooling in PHASE_THREE_SSAMBA_POOLINGS:
             for use_cls in PHASE_THREE_SSAMBA_CLS:
                 for stride_ms in PHASE_THREE_SSAMBA_STRIDES_MS:
@@ -398,7 +437,7 @@ def _build_ssamba_trials() -> tuple[PhaseThreeTrialSpec, ...]:
 def _build_xlstm_trials() -> tuple[PhaseThreeTrialSpec, ...]:
     trials: list[PhaseThreeTrialSpec] = []
     trial_index = 0
-    for seed in PHASE_THREE_SEEDS:
+    for seed in _sweep_seeds():
         for dimension in PHASE_THREE_XLSTM_DIMS:
             for state_reset in PHASE_THREE_XLSTM_STATE_RESETS:
                 for output_mode in PHASE_THREE_XLSTM_OUTPUTS:
@@ -424,7 +463,7 @@ def _build_xlstm_trials() -> tuple[PhaseThreeTrialSpec, ...]:
 def _build_mlp_mixer_trials() -> tuple[PhaseThreeTrialSpec, ...]:
     trials: list[PhaseThreeTrialSpec] = []
     trial_index = 0
-    for seed in PHASE_THREE_SEEDS:
+    for seed in _sweep_seeds():
         for dropout in PHASE_THREE_MLP_MIXER_DROPOUTS:
             for head_l2_norm in PHASE_THREE_MLP_MIXER_HEAD_L2_NORM:
                 trial_index += 1
@@ -657,7 +696,11 @@ class PhaseThreeSweepRunner:
             json.dumps(config.to_dict(), indent=2, sort_keys=True), encoding="utf-8"
         )
 
-        command = build_phase_three_command(config_path, self._trial_run_name(trial))
+        command = build_phase_three_command(
+            config_path,
+            self._trial_run_name(trial),
+            self.output_dir,
+        )
         completed_process = subprocess.run(  # noqa: S603
             command,
             check=True,
@@ -723,6 +766,9 @@ class PhaseThreeSweepRunner:
         optimizer_summary = _phase_three_optimizer_config(optimizer_artifact)
 
         state = self.load_state()
+        trials = _apply_trial_cap(build_phase_three_trials())
+        total_trials = len(trials)
+        logger = logging.getLogger(__name__)
         best_trial_id, top_three_trial_ids, family_winner_ids = self._select_winners(
             state.completed_trials
         )
@@ -732,11 +778,31 @@ class PhaseThreeSweepRunner:
             else None
         )
 
-        for trial in build_phase_three_trials():
+        for trial_index, trial in enumerate(
+            tqdm(trials, total=total_trials, desc="phase-3 trials", leave=False), start=1
+        ):
             if trial.trial_id in state.completed_trials:
+                logger.info(
+                    "[phase-3] [%d/%d] skipping completed %s",
+                    trial_index,
+                    total_trials,
+                    trial.trial_id,
+                )
                 continue
 
+            logger.info(
+                "[phase-3] [%d/%d] running %s",
+                trial_index,
+                total_trials,
+                trial.trial_id,
+            )
+
             trial_record = self._run_trial(trial, feature_summary, optimizer_summary)
+            logger.info(
+                "[phase-3] finished %s validation_macro_f1=%.6f",
+                trial.trial_id,
+                trial_record.validation_macro_f1,
+            )
             completed_trials = {**state.completed_trials, trial.trial_id: trial_record}
 
             best_trial_id, top_three_trial_ids, family_winner_ids = self._select_winners(
@@ -787,7 +853,7 @@ class PhaseThreeSweepRunner:
             "phase": "phase-3",
             "feature_source": feature_summary,
             "optimizer_source": optimizer_summary,
-            "total_trials": len(build_phase_three_trials()),
+            "total_trials": len(trials),
             "completed_trials": len(state.completed_trials),
             "best_validation_macro_f1": state.best_validation_macro_f1,
             "best_trial": state.completed_trials[best_trial_id].to_dict()

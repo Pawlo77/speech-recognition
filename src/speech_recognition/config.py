@@ -229,14 +229,34 @@ class ModelConfig:
     """AST classification head type (linear or mlp_256)."""
     ast_positional_embedding: str = "interp"
     """AST positional embedding mode (interp or learned)."""
+    ast_hidden_size: int = 512
+    """AST transformer hidden size."""
+    ast_num_hidden_layers: int = 10
+    """AST transformer depth."""
+    ast_num_attention_heads: int = 8
+    """AST attention head count."""
+    ast_intermediate_size: int = 2048
+    """AST feed-forward hidden size."""
     ssamba_pooling: str = "mean"
     """SSAMBA pooling mode (mean or max)."""
     ssamba_use_cls: bool = True
     """Whether SSAMBA uses a CLS token path."""
     ssamba_stride_ms: int = 10
     """SSAMBA temporal stride in milliseconds (10 or 5)."""
-    xlstm_dim: int = 32
+    ssamba_d_model: int = 768
+    """SSAMBA hidden dimension."""
+    ssamba_d_state: int = 64
+    """SSAMBA state dimension."""
+    ssamba_d_conv: int = 4
+    """SSAMBA convolution kernel size."""
+    ssamba_expand: int = 2
+    """SSAMBA expansion factor."""
+    ssamba_num_layers: int = 8
+    """Number of stacked SSAMBA blocks."""
+    xlstm_dim: int = 768
     """xLSTM hidden/memory dimension."""
+    xlstm_num_blocks: int = 10
+    """Number of xLSTM blocks in the stack."""
     xlstm_state_reset: bool = True
     """Whether xLSTM state resets between utterances."""
     xlstm_output_mode: str = "final"
@@ -258,9 +278,50 @@ class ModelConfig:
             self.ast_positional_embedding in {"interp", "learned"},
             "ast_positional_embedding must be 'interp' or 'learned'.",
         )
+        _require(
+            self.ast_hidden_size in {384, 512, 576, 640, 768},
+            "ast_hidden_size must be one of {384, 512, 576, 640, 768}.",
+        )
+        _require(
+            self.ast_num_hidden_layers in {8, 10, 12},
+            "ast_num_hidden_layers must be 8, 10, or 12.",
+        )
+        _require(
+            self.ast_num_attention_heads in {6, 8, 9, 10, 12},
+            "ast_num_attention_heads must be one of {6, 8, 9, 10, 12}.",
+        )
+        _require(
+            self.ast_intermediate_size in {1536, 2048, 2304, 2560, 3072},
+            "ast_intermediate_size must be one of {1536, 2048, 2304, 2560, 3072}.",
+        )
+        _require(
+            self.ast_hidden_size % self.ast_num_attention_heads == 0,
+            "ast_hidden_size must be divisible by ast_num_attention_heads.",
+        )
         _require(self.ssamba_pooling in {"mean", "max"}, "ssamba_pooling must be 'mean' or 'max'.")
         _require(self.ssamba_stride_ms in {5, 10}, "ssamba_stride_ms must be 5 or 10.")
-        _require(self.xlstm_dim in {32, 64}, "xlstm_dim must be 32 or 64.")
+        _require(
+            self.ssamba_d_model in {64, 128, 256, 384, 512, 640, 768},
+            "ssamba_d_model must be one of {64, 128, 256, 384, 512, 640, 768}.",
+        )
+        _require(
+            self.ssamba_d_state in {16, 32, 64, 128},
+            "ssamba_d_state must be 16, 32, 64, or 128.",
+        )
+        _require(self.ssamba_d_conv in {2, 3, 4, 5, 7}, "ssamba_d_conv must be 2, 3, 4, 5, or 7.")
+        _require(self.ssamba_expand in {1, 2, 4}, "ssamba_expand must be 1, 2, or 4.")
+        _require(
+            self.ssamba_num_layers in {1, 2, 4, 6, 8, 10, 12},
+            "ssamba_num_layers must be 1, 2, 4, 6, 8, 10, or 12.",
+        )
+        _require(
+            self.xlstm_dim in {32, 64, 128, 256, 384, 512, 768, 896, 1024},
+            "xlstm_dim must be one of {32, 64, 128, 256, 384, 512, 768, 896, 1024}.",
+        )
+        _require(
+            self.xlstm_num_blocks in {1, 2, 4, 6, 8, 10, 12},
+            "xlstm_num_blocks must be 1, 2, 4, 6, 8, 10, or 12.",
+        )
         _require(
             self.xlstm_output_mode in {"final", "mean"},
             "xlstm_output_mode must be 'final' or 'mean'.",

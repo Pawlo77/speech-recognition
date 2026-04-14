@@ -1,6 +1,8 @@
 """Phase-4 held-out evaluation orchestration."""
 
 import json
+import logging
+import os
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -11,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from ..config import ExperimentConfig, ModelConfig
 from .phase_one import _atomic_write_json, _read_json, _serialize
@@ -34,6 +37,39 @@ PHASE_FOUR_STRICT_DROP_LIMIT: float = 0.01
 
 PHASE_FOUR_WARMUP_ITERATIONS: int = 50
 """Warmup iterations excluded from latency measurement."""
+
+_SWEEP_MAX_TRIALS_ENV = "SPEECH_SWEEP_MAX_TRIALS"
+_SWEEP_SEED_ENV = "SPEECH_SWEEP_SEED"
+
+
+def _apply_trial_cap(trials: tuple[Any, ...]) -> tuple[Any, ...]:
+    """Return a capped trial tuple when a smoke-limit env override is set."""
+
+    raw_limit = os.environ.get(_SWEEP_MAX_TRIALS_ENV)
+    if raw_limit in {None, ""}:
+        return trials
+    try:
+        limit = int(raw_limit)
+    except ValueError as exc:
+        raise ValueError(f"{_SWEEP_MAX_TRIALS_ENV} must be an integer.") from exc
+    if limit <= 0:
+        raise ValueError(f"{_SWEEP_MAX_TRIALS_ENV} must be greater than zero.")
+    return trials[:limit]
+
+
+def _sweep_seeds(seeds: tuple[int, ...]) -> tuple[int, ...]:
+    """Return input seeds or a single-seed override for smoke runs."""
+
+    raw_seed = os.environ.get(_SWEEP_SEED_ENV)
+    if raw_seed in {None, ""}:
+        return seeds
+    try:
+        seed = int(raw_seed)
+    except ValueError as exc:
+        raise ValueError(f"{_SWEEP_SEED_ENV} must be an integer.") from exc
+    if seed not in seeds:
+        raise ValueError(f"{_SWEEP_SEED_ENV} must be one of {seeds}.")
+    return (seed,)
 
 
 def _utc_now() -> str:
@@ -163,7 +199,7 @@ def _build_backbone_model_config(backbone_trial: PhaseThreeTrialRecord) -> Model
         return ModelConfig(
             family="xlstm",
             pretrained=False,
-            xlstm_dim=int(params.get("dimension", 32)),
+            xlstm_dim=int(params.get("dimension", 768)),
             xlstm_state_reset=bool(params.get("state_reset", True)),
             xlstm_output_mode=str(params.get("output_mode", "final")),
         )
@@ -736,7 +772,12 @@ class PhaseFourSweepRunner:
             return []
 
         results: list[dict[str, Any]] = []
-        for trial_id in sorted(selected_ids):
+        for trial_id in tqdm(
+            sorted(selected_ids),
+            total=len(selected_ids),
+            desc="phase-4 heldout eval",
+            leave=False,
+        ):
             record = state.completed_trials.get(trial_id)
             if record is None:
                 continue
@@ -789,19 +830,44 @@ class PhaseFourSweepRunner:
         """Run the full phase-4 sweep, skipping completed trials."""
 
         backbone_trials = self._load_phase_three_backbones()
+        seeds = _sweep_seeds(self.base_config.seeds)
+        trials = _apply_trial_cap(build_phase_four_trials(tuple(backbone_trials), seeds))
+        total_trials = len(trials)
+        logger = logging.getLogger(__name__)
         state = self.load_state()
         best_trial_id = state.best_trial_id
         best_score = state.best_macro_f1_nc if state.best_macro_f1_nc is not None else -1.0
 
-        for trial in build_phase_four_trials(tuple(backbone_trials), self.base_config.seeds):
+        for trial_index, trial in enumerate(
+            tqdm(trials, total=total_trials, desc="phase-4 trials", leave=False), start=1
+        ):
             if trial.trial_id in state.completed_trials:
                 existing = state.completed_trials[trial.trial_id]
                 if existing.accepted and existing.macro_f1_nc >= best_score:
                     best_trial_id = trial.trial_id
                     best_score = existing.macro_f1_nc
+                logger.info(
+                    "[phase-4] [%d/%d] skipping completed %s",
+                    trial_index,
+                    total_trials,
+                    trial.trial_id,
+                )
                 continue
 
+            logger.info(
+                "[phase-4] [%d/%d] running %s",
+                trial_index,
+                total_trials,
+                trial.trial_id,
+            )
+
             trial_record = self._run_trial(trial, backbone_trials)
+            logger.info(
+                "[phase-4] finished %s macro_f1_nc=%.6f accepted=%s",
+                trial.trial_id,
+                trial_record.macro_f1_nc,
+                trial_record.accepted,
+            )
             completed_trials = {**state.completed_trials, trial.trial_id: trial_record}
             best_trial_id, method_winner_ids = self._select_winners(completed_trials)
             if trial_record.accepted and trial_record.macro_f1_nc >= best_score:
@@ -845,9 +911,7 @@ class PhaseFourSweepRunner:
             "frozen_backbones": [
                 backbone_trials[trial_id].to_dict() for trial_id in state.phase_three_trial_ids
             ],
-            "total_trials": len(
-                build_phase_four_trials(tuple(backbone_trials), self.base_config.seeds)
-            ),
+            "total_trials": len(trials),
             "completed_trials": len(state.completed_trials),
             "best_macro_f1_nc": state.best_macro_f1_nc,
             "best_trial": state.completed_trials[best_trial_id].to_dict()

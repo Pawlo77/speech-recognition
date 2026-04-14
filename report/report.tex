@@ -151,11 +151,11 @@ Phase $2$ locks the global optimization strategy (Table~\ref{tab:global_hyperpar
 % TODO: Add visual comparison of the structural paradigms: Local spatial (ConvNeXt) vs. Global attention (AST) vs. Sequential state tracking (SSAMBA/xLSTM).
 
 \begin{description}
-    \item[AST (Audio Spectrogram Transformer):] Replaces convolutions with self-attention \cite{vaswani2017attention, gong2021ast}, granting a global receptive field from the first layer and assuming all-to-all interactions are necessary.
-    \item[ConvNeXt (Modern CNN):] Relies on translation equivariance and local correlation \cite{lecun1995convolutional}. It modernizes residual networks with Vision Transformer elements, testing if local spatial hierarchies remain optimal \cite{liu2022convnet}.
-    \item[SSAMBA (Selective State Space):] Adapts Mamba \cite{gu2023mamba} to audio \cite{shams2024ssamba}. By mapping 1D sequences via discretized differential equations, it achieves content-aware focus with RNN-like $O(L)$ efficiency.
-    \item[xLSTM (High-Capacity Recurrence):] Solves classical LSTM scalar bottlenecks by introducing matrix memory $C_t \in \mathbb{R}^{d \times d}$ \cite{beck2024xlstm}, providing a direct test of sequential tracking suitability.
-    \item[MLP-Mixer:] Serves as an architectural null hypothesis \cite{tolstikhin2021mlpmixer}, applying alternating dense matrix multiplications without spatial or sequential priors.
+    \item[AST (Audio Spectrogram Transformer):] Implemented with Hugging Face \texttt{ASTForAudioClassification} (from \texttt{transformers}) using \texttt{ASTConfig} with hidden size $512$, $10$ encoder layers, $8$ attention heads, and intermediate size $2048$ (default non-pretrained setup in this work). \textit{Key feature / why chosen:} global self-attention from the first layer gives immediate all-to-all context, making AST the explicit ``global dependency'' reference model \cite{vaswani2017attention, gong2021ast}.
+    \item[ConvNeXt (Modern CNN):] Implemented as \texttt{torchvision.models.convnext\_tiny} (primary backend), with the first stem convolution adapted to one-channel spectrogram input; \texttt{timm convnext\_tiny} is kept as backend fallback. \textit{Key feature / why chosen:} strong locality and translation-equivariant inductive bias provide the canonical modern CNN baseline against which global and recurrent models are compared \cite{lecun1995convolutional, liu2022convnet}.
+    \item[SSAMBA (Selective State Space):] Implemented through \texttt{mamba\_ssm.Mamba} blocks in a repository wrapper (\texttt{MambaHead}), stacked with default configuration $d_{\text{model}}=768$, $d_{\text{state}}=64$, $d_{\text{conv}}=4$, expand $=2$, and $8$ layers. \textit{Key feature / why chosen:} input-selective state-space updates target long-range sequence modeling with linear-time scaling, representing an efficient alternative to full attention \cite{gu2023mamba,shams2024ssamba}.
+    \item[xLSTM (High-Capacity Recurrence):] Implemented with \texttt{xlstm.xLSTMBlockStack} in a repository wrapper (\texttt{XLSTMHead}), using embedding dimension $768$ and $10$ blocks by default (alternating mLSTM/sLSTM placements). \textit{Key feature / why chosen:} matrix-memory recurrence $C_t \in \mathbb{R}^{d \times d}$ increases recurrent capacity beyond standard LSTM cells, serving as the high-capacity recurrent comparator \cite{beck2024xlstm}.
+    \item[MLP-Mixer:] Implemented as \texttt{timm gmixer\_24\_224} (official gMLP/Mixer-family model) for the MLP-only baseline. \textit{Key feature / why chosen:} token/channel mixing via dense projections with no explicit convolutional or recurrent prior acts as an architectural ``minimal prior'' control \cite{tolstikhin2021mlpmixer}.
 \end{description}
 
 \begin{table}[htbp]
@@ -172,21 +172,21 @@ LR scheduler & Cosine Annealing with Warmup / Reduce LR on Plateau & Cosine anne
 \end{tabularx}
 \end{table}
 
-\begin{table}[htbp]
+\begin{table*}[htbp]
 \centering
-\caption{Model-specific hyperparameter sweeps (Phase $3$).}
+\caption{Model-specific hyperparameter sweeps (Phase $3$), including architecture type and parameter count from official backend implementations (default non-pretrained configuration, $12$ output classes).}
 \label{tab:model_hyperparams}
 \small
-\begin{tabularx}{\columnwidth}{@{}l X@{}}
+\begin{tabular}{@{}p{1.8cm} p{4.1cm} p{1.8cm} p{8.0cm}@{}}
 \toprule
-\textbf{Model} & \textbf{Sweep Space} \\ \midrule
-\textbf{AST} & Dropout $\{0.1, 0.5\}$; Head \{linear, MLP(256)\}; Pos. Emb. \{interp., learned\} \cite{gong2021ast} \\
-\textbf{ConvNeXt} & Stoch. Depth $\{0.0, 0.2\}$; Kernel size $\{7\times7\}$ \cite{liu2022convnet} \\
-\textbf{SSAMBA} & Pooling \{mean, max\}; CLS \{yes, no\}; Stride $\{10\text{ms}, 5\text{ms}\}$ \cite{gu2023mamba,shams2024ssamba} \\
-\textbf{xLSTM} & Dim $d \in \{32, 64\}$; State Reset \{T, F\}; Output \{final, mean\} \cite{beck2024xlstm} \\
-\textbf{MLP-Mixer} & Dropout $\{0.0, 0.2\}$; Head L2 Norm \{yes, no\} \cite{tolstikhin2021mlpmixer} \\ \bottomrule
-\end{tabularx}
-\end{table}
+\textbf{Model} & \textbf{Arch. type} & \textbf{Total params} & \textbf{Sweep Space} \\ \midrule
+\textbf{AST} & Transformer (global attention) & $31{,}720{,}972$ & Dropout $\{0.1, 0.5\}$; Head \{linear, MLP(256)\}; Pos. Emb. \{interp., learned\}; default size: hidden $=512$, layers $=10$, heads $=8$ \cite{gong2021ast} \\
+\textbf{ConvNeXt} & CNN (local spatial hierarchy) & $27{,}826{,}284$ & Stoch. Depth $\{0.0, 0.2\}$; Kernel size $\{7\times7\}$ \cite{liu2022convnet} \\
+\textbf{SSAMBA} & State-space sequence model & $31{,}947{,}276$ & Pooling \{mean, max\}; CLS \{yes, no\}; Stride $\{10\text{ms}, 5\text{ms}\}$; $d_{\text{model}}=768$, $d_{\text{state}}=64$, layers $=8$ \cite{gu2023mamba,shams2024ssamba} \\
+\textbf{xLSTM} & Recurrent sequence model & $35{,}781{,}172$ & Dim $d \in \{768, 896\}$; State Reset \{T, F\}; Output \{final, mean\}; default stack uses $d=768$, blocks $=10$ \cite{beck2024xlstm} \\
+\textbf{MLP-Mixer} & MLP-only token/channel mixer & $24{,}144{,}108$ & Dropout $\{0.0, 0.2\}$; Head L2 Norm \{yes, no\}; default timm variant: \texttt{gmixer\_24\_224} \cite{tolstikhin2021mlpmixer} \\ \bottomrule
+\end{tabular}
+\end{table*}
 
 \subsection{Phase 4: Non-Command Class Methodology (Q3)}
 All core models are optimized natively via standard \texttt{CrossEntropyLoss} \cite{goodfellow2016deep}. We intentionally defer imbalance-specific loss shaping and resampling in earlier phases to keep architectural comparisons interpretable. Phases $1$--$3$ use command-only data splits while preserving a shared implementation template for model heads. Phase $4$ keeps the selected backbone family and hyperparameters fixed and retrains on \texttt{train\_extended} for explicit non-command handling. In this sense, ``freezing the top $3$ architectures'' refers to freezing architecture and optimization choices selected upstream. In Phase $4$, we test $5$ alternatives for handling \texttt{\_\_unknown\_\_} and \texttt{\_\_silence\_\_}:
@@ -216,7 +216,7 @@ The outputs of Phase $4$ define the final deployable systems and are the only sy
 \section{Strict Reproducibility and Training Control}
 To account for hardware-level non-determinism during GPU acceleration, we execute every experiment three separate times using fixed starting points (seeds $0$, $42$, and $2003$) and report aggregated results (mean $\pm$ standard deviation).
 
-All experiments are run on a single Apple MacBook Pro with an M4 Pro chip, $48$ GB unified memory, and a $512$ GB SSD. This hardware budget motivates the use of \texttt{train\_small} and \texttt{valid\_small} in Phases $1$--$3$.
+All experiments are run on a single Apple MacBook Pro with an M4 Pro chip, $48$ GB unified memory, and a $1024$ GB SSD. This hardware budget motivates the use of \texttt{train\_small} and \texttt{valid\_small} in Phases $1$--$3$.
 
 To stabilize compute and comparisons in Phases $1$--$3$, the small splits are fixed to exactly $1{,}000$/$250$/$250$ samples per command class for train/validation/test, respectively.
 

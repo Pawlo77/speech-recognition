@@ -1,6 +1,8 @@
 """Phase-2 global hyperparameter sweep orchestration."""
 
 import json
+import logging
+import os
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -8,6 +10,8 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from tqdm.auto import tqdm
 
 from ..config import ExperimentConfig, SchedulerConfig
 from .phase_one import _atomic_write_json, _feature_pipeline_for_trial, _read_json, _serialize
@@ -27,6 +31,39 @@ PHASE_TWO_SEEDS: tuple[int, int, int] = (0, 42, 2003)
 
 PHASE_TWO_STATE_SCHEMA_VERSION: int = 1
 """Schema version for the phase-2 sweep state file."""
+
+_SWEEP_MAX_TRIALS_ENV = "SPEECH_SWEEP_MAX_TRIALS"
+_SWEEP_SEED_ENV = "SPEECH_SWEEP_SEED"
+
+
+def _apply_trial_cap(trials: tuple[Any, ...]) -> tuple[Any, ...]:
+    """Return a capped trial tuple when a smoke-limit env override is set."""
+
+    raw_limit = os.environ.get(_SWEEP_MAX_TRIALS_ENV)
+    if raw_limit in {None, ""}:
+        return trials
+    try:
+        limit = int(raw_limit)
+    except ValueError as exc:
+        raise ValueError(f"{_SWEEP_MAX_TRIALS_ENV} must be an integer.") from exc
+    if limit <= 0:
+        raise ValueError(f"{_SWEEP_MAX_TRIALS_ENV} must be greater than zero.")
+    return trials[:limit]
+
+
+def _sweep_seeds() -> tuple[int, ...]:
+    """Return default seeds or a single-seed override for smoke runs."""
+
+    raw_seed = os.environ.get(_SWEEP_SEED_ENV)
+    if raw_seed in {None, ""}:
+        return PHASE_TWO_SEEDS
+    try:
+        seed = int(raw_seed)
+    except ValueError as exc:
+        raise ValueError(f"{_SWEEP_SEED_ENV} must be an integer.") from exc
+    if seed not in PHASE_TWO_SEEDS:
+        raise ValueError(f"{_SWEEP_SEED_ENV} must be one of {PHASE_TWO_SEEDS}.")
+    return (seed,)
 
 
 def _phase_two_group_key(record: "PhaseTwoTrialRecord") -> tuple[str, str, float, str]:
@@ -169,7 +206,7 @@ def _phase_two_feature_config(feature_artifact: Mapping[str, Any]) -> dict[str, 
     }
 
 
-def build_phase_two_command(config_path: Path, run_name: str) -> list[str]:
+def build_phase_two_command(config_path: Path, run_name: str, output_dir: Path) -> list[str]:
     """Build the isolated subprocess command for one phase-2 trial."""
 
     return [
@@ -179,6 +216,8 @@ def build_phase_two_command(config_path: Path, run_name: str) -> list[str]:
         "run-single-train",
         "--config",
         str(config_path),
+        "--output-dir",
+        str(output_dir),
         "--run-name",
         run_name,
     ]
@@ -244,7 +283,7 @@ def build_phase_two_trials(feature_name: str) -> tuple[PhaseTwoTrialSpec, ...]:
     for weight_decay in PHASE_TWO_WEIGHT_DECAYS:
         for scheduler_name in PHASE_TWO_SCHEDULERS:
             for proxy_model in PHASE_TWO_PROXY_MODELS:
-                for seed in PHASE_TWO_SEEDS:
+                for seed in _sweep_seeds():
                     trial_index += 1
                     trials.append(
                         PhaseTwoTrialSpec(
@@ -411,7 +450,7 @@ class PhaseTwoSweepRunner:
             json.dumps(config.to_dict(), indent=2, sort_keys=True), encoding="utf-8"
         )
 
-        command = build_phase_two_command(config_path, self._trial_run_name(trial))
+        command = build_phase_two_command(config_path, self._trial_run_name(trial), self.output_dir)
         completed_process = subprocess.run(  # noqa: S603
             command,
             check=True,
@@ -442,15 +481,38 @@ class PhaseTwoSweepRunner:
         feature_artifact = _feature_artifact_trial_payload(self.phase_one_best_feature_path)
         feature_summary = _phase_two_feature_config(feature_artifact)
         feature_name = feature_summary["feature_name"]
+        trials = _apply_trial_cap(build_phase_two_trials(feature_name))
+        total_trials = len(trials)
+        logger = logging.getLogger(__name__)
 
         state = self.load_state()
         best_trial_id, best_score, aggregate = _select_phase_two_winner(state.completed_trials)
 
-        for trial in build_phase_two_trials(feature_name):
+        for trial_index, trial in enumerate(
+            tqdm(trials, total=total_trials, desc="phase-2 trials", leave=False), start=1
+        ):
             if trial.trial_id in state.completed_trials:
+                logger.info(
+                    "[phase-2] [%d/%d] skipping completed %s",
+                    trial_index,
+                    total_trials,
+                    trial.trial_id,
+                )
                 continue
 
+            logger.info(
+                "[phase-2] [%d/%d] running %s",
+                trial_index,
+                total_trials,
+                trial.trial_id,
+            )
+
             trial_record = self._run_trial(trial, feature_artifact)
+            logger.info(
+                "[phase-2] finished %s validation_macro_f1=%.6f",
+                trial.trial_id,
+                trial_record.validation_macro_f1,
+            )
             completed_trials = {**state.completed_trials, trial.trial_id: trial_record}
             best_trial_id, best_score, aggregate = _select_phase_two_winner(completed_trials)
 
@@ -483,7 +545,7 @@ class PhaseTwoSweepRunner:
         return {
             "phase": "phase-2",
             "feature_source": feature_summary,
-            "total_trials": len(build_phase_two_trials(feature_name)),
+            "total_trials": len(trials),
             "completed_trials": len(state.completed_trials),
             "best_trial": state.completed_trials[best_trial_id].to_dict()
             if best_trial_id

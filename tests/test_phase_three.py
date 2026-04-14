@@ -16,15 +16,20 @@ from speech_recognition.orchestration.phase_three import (
 
 def test_build_phase_three_command_uses_isolated_child_contract(tmp_path: Path) -> None:
     config_path = tmp_path / "temp_config.json"
+    output_dir = tmp_path / "outputs"
 
     command = build_phase_three_command(
-        config_path, "trial_01_ast_linear_interp_dropout_0.1_seed_0"
+        config_path,
+        "trial_01_ast_linear_interp_dropout_0.1_seed_0",
+        output_dir,
     )
 
     assert command[:4] == [sys.executable, "-m", "speech_recognition.cli", "run-single-train"]
     assert command[4:] == [
         "--config",
         str(config_path),
+        "--output-dir",
+        str(output_dir),
         "--run-name",
         "trial_01_ast_linear_interp_dropout_0.1_seed_0",
     ]

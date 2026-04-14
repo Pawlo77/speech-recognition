@@ -41,7 +41,7 @@ def test_model_registry_forward_output_shape_is_batch_by_class_count(family: str
 
 
 def test_model_registry_exposes_explicit_source_libraries() -> None:
-    assert SOURCE_LIBRARY_BY_FAMILY["ast"] == ("transformers", "timm")
+    assert SOURCE_LIBRARY_BY_FAMILY["ast"] == ("transformers",)
     assert SOURCE_LIBRARY_BY_FAMILY["convnext"] == ("torchvision", "timm")
     assert SOURCE_LIBRARY_BY_FAMILY["ssamba"] == ("mamba-ssm",)
     assert SOURCE_LIBRARY_BY_FAMILY["xlstm"] == ("xlstm",)

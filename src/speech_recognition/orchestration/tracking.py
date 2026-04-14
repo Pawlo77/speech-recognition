@@ -128,6 +128,8 @@ class MlflowRunTracker:
     """MLflow module reference (lazy-loaded)."""
     _run_active: bool = field(default=False, init=False, repr=False)
     """Whether MLflow run is currently active."""
+    _logged_checkpoint_paths: set[str] = field(default_factory=set, init=False, repr=False)
+    """Checkpoint artifact paths already logged for this run."""
 
     def start(self) -> None:
         """Start a run and log static hyperparameters and efficiency metrics."""
@@ -202,6 +204,20 @@ class MlflowRunTracker:
             )
             mlflow.log_artifact(str(report_path))
 
+    def _log_json_artifact(self, artifact_name: str, payload: Mapping[str, Any]) -> None:
+        """Persist a JSON payload as an MLflow artifact."""
+
+        if not self._run_active or self._mlflow is None or not self.tracking.log_artifacts:
+            return
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            artifact_path = Path(temporary_dir) / artifact_name
+            artifact_path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            self._mlflow.log_artifact(str(artifact_path))
+
     def log_training_metrics(
         self,
         *,
@@ -235,9 +251,16 @@ class MlflowRunTracker:
 
         if checkpoint_path is not None:
             checkpoint = Path(checkpoint_path)
-            self._mlflow.log_param("checkpoint_path", str(checkpoint))
-            if self.tracking.log_artifacts and checkpoint.exists():
+            # Use a mutable tag for "latest" pointer; params are immutable in MLflow.
+            self._mlflow.set_tag("latest_checkpoint_path", str(checkpoint))
+            checkpoint_key = str(checkpoint)
+            if (
+                self.tracking.log_artifacts
+                and checkpoint.exists()
+                and checkpoint_key not in self._logged_checkpoint_paths
+            ):
                 self._mlflow.log_artifact(str(checkpoint))
+                self._logged_checkpoint_paths.add(checkpoint_key)
 
     def log_payload(self, payload: Mapping[str, Any]) -> None:
         """Recursively log any training-style fields found in a payload."""
@@ -250,6 +273,7 @@ class MlflowRunTracker:
         validation_macro_f1 = payload.get("validation_macro_f1")
 
         flattened_metrics = _flatten_numeric_metrics(metrics) if metrics else {}
+        flattened_metrics.update(_extract_phase_performance_metrics(payload))
 
         self.log_training_metrics(
             loss=float(loss) if loss is not None else None,
@@ -262,6 +286,12 @@ class MlflowRunTracker:
             extra_metrics=flattened_metrics if flattened_metrics else None,
         )
 
+        decisions_payload = _extract_decisions(payload)
+        if decisions_payload:
+            self._log_json_artifact("decisions.json", decisions_payload)
+        if self.tracking.log_artifacts:
+            self._log_json_artifact("run_payload.json", dict(payload))
+
     def close(self) -> None:
         """End the active MLflow run if one was started."""
 
@@ -271,6 +301,7 @@ class MlflowRunTracker:
             finally:
                 self._run_active = False
                 self._mlflow = None
+                self._logged_checkpoint_paths.clear()
 
 
 def build_mlflow_tracker(experiment_config: ExperimentConfig, run_name: str) -> MlflowRunTracker:
@@ -301,3 +332,57 @@ def _flatten_numeric_metrics(value: Mapping[str, Any], prefix: str = "") -> dict
         elif isinstance(item, int | float) and not isinstance(item, bool):
             flattened[metric_name] = float(item)
     return flattened
+
+
+def _extract_phase_performance_metrics(payload: Mapping[str, Any]) -> dict[str, float]:
+    """Extract runtime/resource metrics from top-level and phase outputs."""
+
+    metrics: dict[str, float] = {}
+
+    direct_performance = payload.get("performance")
+    if isinstance(direct_performance, Mapping):
+        metrics.update(_flatten_numeric_metrics(direct_performance, prefix="runtime"))
+
+    training_performance = payload.get("training_performance")
+    if isinstance(training_performance, Mapping):
+        metrics.update(_flatten_numeric_metrics(training_performance, prefix="training"))
+
+    phase_artifacts = payload.get("phase_artifacts")
+    if isinstance(phase_artifacts, Mapping):
+        for phase_name, artifact in phase_artifacts.items():
+            if not isinstance(artifact, Mapping):
+                continue
+            output_data = artifact.get("output_data")
+            if not isinstance(output_data, Mapping):
+                continue
+            perf = output_data.get("performance")
+            if isinstance(perf, Mapping):
+                metrics.update(_flatten_numeric_metrics(perf, prefix=f"{phase_name}.performance"))
+            phase_metrics = output_data.get("metrics")
+            if isinstance(phase_metrics, Mapping):
+                metrics.update(
+                    _flatten_numeric_metrics(phase_metrics, prefix=f"{phase_name}.metrics")
+                )
+
+    return metrics
+
+
+def _extract_decisions(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Extract high-level model selection decisions from run payload."""
+
+    keys = (
+        "phase",
+        "best_trial",
+        "best_trial_id",
+        "best_validation_macro_f1",
+        "best_macro_f1_nc",
+        "best_aggregate",
+        "feature_source",
+        "optimizer_source",
+        "top_three",
+        "family_winners",
+        "method_winners",
+        "selected_test_results",
+        "ensemble_results",
+    )
+    return {key: payload[key] for key in keys if key in payload}

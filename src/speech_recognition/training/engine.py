@@ -1,6 +1,8 @@
 """Explicit epoch/step training loop with resumable checkpoints."""
 
 import contextlib
+import logging
+import os
 import pickle
 import random
 import re
@@ -13,10 +15,27 @@ from typing import Any
 import numpy as np
 import torch
 from torch import Tensor, nn
+from tqdm.auto import tqdm
 
 from ..config import TrainingControlConfig
 
 _CHECKPOINT_PATTERN = re.compile(r"^checkpoint_step_(\d+)$")
+_TRAIN_MAX_STEPS_ENV = "SPEECH_TRAIN_MAX_STEPS"
+
+
+def _max_train_steps_override() -> int | None:
+    """Return an optional max-step override used for smoke checks."""
+
+    raw_limit = os.environ.get(_TRAIN_MAX_STEPS_ENV)
+    if raw_limit in {None, ""}:
+        return None
+    try:
+        limit = int(raw_limit)
+    except ValueError as exc:
+        raise ValueError(f"{_TRAIN_MAX_STEPS_ENV} must be an integer.") from exc
+    if limit <= 0:
+        raise ValueError(f"{_TRAIN_MAX_STEPS_ENV} must be greater than zero.")
+    return limit
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +105,8 @@ class TrainingEngine:
     def __post_init__(self) -> None:
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.model.to(self.device)
+        # Keep loss buffers (e.g. class weights) on the same device as logits/targets.
+        self.loss_fn.to(self.device)
         if self.use_mixed_precision is None:
             self.use_mixed_precision = self.training_config.use_mixed_precision
 
@@ -224,7 +245,12 @@ class TrainingEngine:
         targets: list[int] = []
 
         with torch.no_grad():
-            for batch in data_loader:
+            for batch in tqdm(
+                data_loader,
+                total=len(data_loader),
+                desc="validation batches",
+                leave=False,
+            ):
                 inputs, batch_targets = self._move_batch(batch)
                 with self._autocast_context():
                     logits = self.model(inputs)
@@ -239,11 +265,24 @@ class TrainingEngine:
         average_loss = total_loss / total_examples if total_examples else 0.0
         return {"validation_loss": average_loss, "validation_macro_f1": macro_f1}
 
-    def fit(self, train_loader: Any, val_loader: Any | None = None) -> dict[str, Any]:
-        """Train the model with explicit epoch and step control."""
+    def fit(
+        self,
+        train_loader: Any,
+        val_loader: Any | None = None,
+        tracker: Any | None = None,
+    ) -> dict[str, Any]:
+        """Train the model with explicit epoch and step control.
 
+        If ``tracker`` is provided and implements ``log_training_metrics``,
+        periodic training/validation metrics and checkpoint artifacts will be
+        forwarded to the tracker (e.g., an MLflow tracker).
+        """
+
+        max_train_steps = _max_train_steps_override()
         if val_loader is not None:
             _ = len(val_loader)
+
+        logger = logging.getLogger(__name__)
 
         steps_per_epoch = len(train_loader)
         if steps_per_epoch <= 0:
@@ -262,10 +301,22 @@ class TrainingEngine:
 
         last_validation: dict[str, float] = {}
         last_checkpoint_path: Path | None = None
+        stop_training = False
 
-        for epoch in range(start_epoch, self.training_config.epochs):
+        epoch_indices = range(start_epoch, self.training_config.epochs)
+        for epoch in tqdm(
+            epoch_indices,
+            total=max(0, self.training_config.epochs - start_epoch),
+            desc="epochs",
+        ):
             try:
-                for batch_index, batch in enumerate(train_loader):
+                steps_this_epoch = len(train_loader)
+                for batch_index, batch in tqdm(
+                    enumerate(train_loader),
+                    total=steps_this_epoch,
+                    desc=f"epoch {epoch + 1}/{self.training_config.epochs} batches",
+                    leave=False,
+                ):
                     if epoch == start_epoch and batch_index < batch_offset:
                         continue
                     loss_value = self._train_batch(batch)
@@ -274,14 +325,62 @@ class TrainingEngine:
                         self.training_config.log_every_n_steps > 0
                         and global_step % self.training_config.log_every_n_steps == 0
                     ):
-                        _ = loss_value
+                        logger.info(
+                            "[train] epoch=%d/%d step=%d loss=%.6f",
+                            epoch + 1,
+                            self.training_config.epochs,
+                            global_step,
+                            loss_value,
+                        )
+                        if tracker is not None and hasattr(tracker, "log_training_metrics"):
+                            try:
+                                tracker.log_training_metrics(
+                                    loss=loss_value, epoch=epoch + 1, step=global_step
+                                )
+                            except Exception:
+                                logger.exception("tracker.log_training_metrics failed")
+
                     last_checkpoint_path = self.save_checkpoint(epoch=epoch, step=global_step)
+                    if max_train_steps is not None and global_step >= max_train_steps:
+                        logger.info(
+                            (
+                                "[train] reached SPEECH_TRAIN_MAX_STEPS=%d; "
+                                "stopping early for smoke run"
+                            ),
+                            max_train_steps,
+                        )
+                        stop_training = True
+                        break
                 batch_offset = 0
                 if (
                     val_loader is not None
                     and (epoch + 1) % self.training_config.validate_every_n_epochs == 0
                 ):
                     last_validation = self.evaluate(val_loader)
+                    logger.info(
+                        "[val] epoch=%d/%d validation_loss=%.6f validation_macro_f1=%.6f",
+                        epoch + 1,
+                        self.training_config.epochs,
+                        last_validation.get("validation_loss", 0.0),
+                        last_validation.get("validation_macro_f1", 0.0),
+                    )
+                    if tracker is not None and hasattr(tracker, "log_training_metrics"):
+                        try:
+                            tracker.log_training_metrics(
+                                validation_macro_f1=last_validation.get(
+                                    "validation_macro_f1", None
+                                ),
+                                checkpoint_path=(
+                                    str(last_checkpoint_path) if last_checkpoint_path else None
+                                ),
+                                epoch=epoch + 1,
+                                step=global_step,
+                                extra_metrics={
+                                    "validation_loss": last_validation.get("validation_loss", 0.0)
+                                },
+                            )
+                        except Exception:
+                            logger.exception("tracker.log_training_metrics failed")
                 if self.scheduler is not None:
                     scheduler_step = getattr(self.scheduler, "step", None)
                     if callable(scheduler_step):
@@ -293,6 +392,25 @@ class TrainingEngine:
                         else:
                             scheduler_step()
                 last_checkpoint_path = self.save_checkpoint(epoch=epoch + 1, step=global_step)
+                logger.info(
+                    "[train] completed epoch %d/%d global_step=%d",
+                    epoch + 1,
+                    self.training_config.epochs,
+                    global_step,
+                )
+                if tracker is not None and hasattr(tracker, "log_training_metrics"):
+                    try:
+                        tracker.log_training_metrics(
+                            checkpoint_path=(
+                                str(last_checkpoint_path) if last_checkpoint_path else None
+                            ),
+                            epoch=epoch + 1,
+                            step=global_step,
+                        )
+                    except Exception:
+                        logger.exception("tracker.log_training_metrics failed")
+                if stop_training:
+                    break
             except KeyboardInterrupt:
                 last_checkpoint_path = self.save_checkpoint(epoch=epoch, step=global_step)
                 raise

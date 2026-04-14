@@ -1,0 +1,6 @@
+model,source_library,backbone_class,total_parameters,trainable_parameters,ast_hidden_size,ast_num_hidden_layers,ast_num_attention_heads,ast_intermediate_size,ssamba_d_model,ssamba_d_state,ssamba_num_layers,xlstm_dim,xlstm_num_blocks
+ast,transformers,ASTBackboneWrapper,31720972,31720972,512.0,10.0,8.0,2048.0,,,,,
+convnext,torchvision,ConvNeXt,27826284,27826284,,,,,,,,,
+mlp_mixer,timm,MlpMixer,24144108,24144108,,,,,,,,,
+ssamba,mamba-ssm,MambaHead,31947276,31947276,,,,,768.0,64.0,8.0,,
+xlstm,xlstm,XLSTMHead,35781172,35781172,,,,,,,,768.0,10.0

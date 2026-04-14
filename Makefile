@@ -7,7 +7,7 @@ export PYTHONPATH=.
 export PYTORCH_ENABLE_MPS_FALLBACK=1
 export OMP_NUM_THREADS=1
 
-.PHONY: help install clean test pre-commit pre-commit-all datasets phase-1 phase-2 phase-3 phase-4 full-pipeline mlflow
+.PHONY: help install clean test pre-commit pre-commit-all datasets phase-1 phase-2 phase-3 phase-4 full-pipeline full-pipeline-check mlflow
 
 ############################
 # Repo Maintenance Targets #
@@ -27,6 +27,7 @@ help:
 	@echo "  make phase-3                - Run phase 3 orchestration"
 	@echo "  make phase-4                - Run phase 4 orchestration"
 	@echo "  make full-pipeline          - Run the full pipeline"
+	@echo "  make full-pipeline-check    - Run all settings for one seed with few training steps"
 	@echo "  make mlflow                 - Launch MLflow UI for local runs"
 
 # install dependencies and pre-commit hooks
@@ -78,6 +79,45 @@ phase-4:
 # Execute the full pipeline
 full-pipeline:
 	uv run speech-recognition run --output-dir outputs --run-name default
+
+# Execute all orchestration phases with lightweight smoke-test limits.
+full-pipeline-check:
+	@set -eu; \
+	set -o pipefail; \
+	RUN_TS="$$(date +%Y%m%d_%H%M%S)"; \
+	RUN_ROOT="outputs/full-pipeline-check"; \
+	LOG_DIR="$$RUN_ROOT/logs/$$RUN_TS"; \
+	mkdir -p "$$LOG_DIR"; \
+	export TQDM_DISABLE=1; \
+	echo "Full pipeline check logs: $$LOG_DIR"; \
+	phase_1_start="$$(date +%s)"; \
+	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-1 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-1.log"; \
+	phase_1_end="$$(date +%s)"; \
+	phase_1_secs="$$((phase_1_end - phase_1_start))"; \
+	echo "phase-1 duration: $${phase_1_secs}s"; \
+	phase_2_start="$$(date +%s)"; \
+	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-2 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-2.log"; \
+	phase_2_end="$$(date +%s)"; \
+	phase_2_secs="$$((phase_2_end - phase_2_start))"; \
+	echo "phase-2 duration: $${phase_2_secs}s"; \
+	phase_3_start="$$(date +%s)"; \
+	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-3 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-3.log"; \
+	phase_3_end="$$(date +%s)"; \
+	phase_3_secs="$$((phase_3_end - phase_3_start))"; \
+	echo "phase-3 duration: $${phase_3_secs}s"; \
+	phase_4_start="$$(date +%s)"; \
+	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-4 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-4.log"; \
+	phase_4_end="$$(date +%s)"; \
+	phase_4_secs="$$((phase_4_end - phase_4_start))"; \
+	echo "phase-4 duration: $${phase_4_secs}s"; \
+	smoke_total_secs="$$((phase_1_secs + phase_2_secs + phase_3_secs + phase_4_secs))"; \
+	estimated_full_secs="$$((phase_1_secs * 30 / 10 + phase_2_secs * 24 / 8 + phase_3_secs * 90 / 30 + phase_4_secs * 45 / 15))"; \
+	echo "smoke_total_seconds=$$smoke_total_secs" | tee "$$LOG_DIR/summary.txt"; \
+	echo "estimated_full_seconds_by_trial_scaling=$$estimated_full_secs" | tee -a "$$LOG_DIR/summary.txt"; \
+	echo "estimated_full_hms=$$((estimated_full_secs / 3600))h $$(((estimated_full_secs % 3600) / 60))m $$((estimated_full_secs % 60))s" | tee -a "$$LOG_DIR/summary.txt"; \
+	uv run python -m speech_recognition.orchestration.eta_estimate --run-root "$$RUN_ROOT" | tee -a "$$LOG_DIR/summary.txt"; \
+	echo "Logs saved under $$LOG_DIR"; \
+	echo "Note: compare trial-scaled ETA with historical P50/P90 ETA bands above."
 
 #################
 # Other Targets #

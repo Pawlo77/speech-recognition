@@ -1,6 +1,8 @@
 """Phase-1 feature ablation sweep orchestration."""
 
 import json
+import logging
+import os
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -8,6 +10,8 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from tqdm.auto import tqdm
 
 from ..config import ExperimentConfig, FeaturePipelineConfig
 from .services import build_isolated_subprocess_env
@@ -29,6 +33,39 @@ PHASE_ONE_SEEDS: tuple[int, int, int] = (0, 42, 2003)
 
 PHASE_ONE_STATE_SCHEMA_VERSION: int = 1
 """Schema version for the phase-1 sweep state file."""
+
+_SWEEP_MAX_TRIALS_ENV = "SPEECH_SWEEP_MAX_TRIALS"
+_SWEEP_SEED_ENV = "SPEECH_SWEEP_SEED"
+
+
+def _apply_trial_cap(trials: tuple[Any, ...]) -> tuple[Any, ...]:
+    """Return a capped trial tuple when a smoke-limit env override is set."""
+
+    raw_limit = os.environ.get(_SWEEP_MAX_TRIALS_ENV)
+    if raw_limit in {None, ""}:
+        return trials
+    try:
+        limit = int(raw_limit)
+    except ValueError as exc:
+        raise ValueError(f"{_SWEEP_MAX_TRIALS_ENV} must be an integer.") from exc
+    if limit <= 0:
+        raise ValueError(f"{_SWEEP_MAX_TRIALS_ENV} must be greater than zero.")
+    return trials[:limit]
+
+
+def _sweep_seeds() -> tuple[int, ...]:
+    """Return default seeds or a single-seed override for smoke runs."""
+
+    raw_seed = os.environ.get(_SWEEP_SEED_ENV)
+    if raw_seed in {None, ""}:
+        return PHASE_ONE_SEEDS
+    try:
+        seed = int(raw_seed)
+    except ValueError as exc:
+        raise ValueError(f"{_SWEEP_SEED_ENV} must be an integer.") from exc
+    if seed not in PHASE_ONE_SEEDS:
+        raise ValueError(f"{_SWEEP_SEED_ENV} must be one of {PHASE_ONE_SEEDS}.")
+    return (seed,)
 
 
 def _phase_one_group_key(record: "PhaseOneTrialRecord") -> tuple[str, str]:
@@ -189,7 +226,7 @@ def _summary_from_completed_process(
     return payload if isinstance(payload, dict) else {}
 
 
-def build_phase_one_command(config_path: Path, run_name: str) -> list[str]:
+def build_phase_one_command(config_path: Path, run_name: str, output_dir: Path) -> list[str]:
     """Build the isolated subprocess command for one phase-1 trial."""
 
     return [
@@ -199,6 +236,8 @@ def build_phase_one_command(config_path: Path, run_name: str) -> list[str]:
         "run-single-train",
         "--config",
         str(config_path),
+        "--output-dir",
+        str(output_dir),
         "--run-name",
         run_name,
     ]
@@ -241,7 +280,7 @@ def build_phase_one_trials() -> tuple[PhaseOneTrialSpec, ...]:
     trial_index = 0
     for feature_name in PHASE_ONE_FEATURES:
         for proxy_model in PHASE_ONE_PROXY_MODELS:
-            for seed in PHASE_ONE_SEEDS:
+            for seed in _sweep_seeds():
                 trial_index += 1
                 trials.append(
                     PhaseOneTrialSpec(
@@ -407,7 +446,7 @@ class PhaseOneSweepRunner:
             json.dumps(config.to_dict(), indent=2, sort_keys=True), encoding="utf-8"
         )
 
-        command = build_phase_one_command(config_path, self._trial_run_name(trial))
+        command = build_phase_one_command(config_path, self._trial_run_name(trial), self.output_dir)
         completed_process = subprocess.run(  # noqa: S603
             command,
             check=True,
@@ -433,14 +472,37 @@ class PhaseOneSweepRunner:
     def execute(self) -> dict[str, Any]:
         """Run the full phase-1 sweep, skipping completed trials."""
 
+        trials = _apply_trial_cap(build_phase_one_trials())
+        total_trials = len(trials)
+        logger = logging.getLogger(__name__)
         state = self.load_state()
         best_trial_id, best_score, aggregate = _select_phase_one_winner(state.completed_trials)
 
-        for trial in build_phase_one_trials():
+        for trial_index, trial in enumerate(
+            tqdm(trials, total=total_trials, desc="phase-1 trials", leave=False), start=1
+        ):
             if trial.trial_id in state.completed_trials:
+                logger.info(
+                    "[phase-1] [%d/%d] skipping completed %s",
+                    trial_index,
+                    total_trials,
+                    trial.trial_id,
+                )
                 continue
 
+            logger.info(
+                "[phase-1] [%d/%d] running %s",
+                trial_index,
+                total_trials,
+                trial.trial_id,
+            )
+
             trial_record = self._run_trial(trial)
+            logger.info(
+                "[phase-1] finished %s validation_macro_f1=%.6f",
+                trial.trial_id,
+                trial_record.validation_macro_f1,
+            )
             completed_trials = {**state.completed_trials, trial.trial_id: trial_record}
             best_trial_id, best_score, aggregate = _select_phase_one_winner(completed_trials)
             state = PhaseOneSweepState(
@@ -470,7 +532,7 @@ class PhaseOneSweepRunner:
 
         return {
             "phase": "phase-1",
-            "total_trials": len(build_phase_one_trials()),
+            "total_trials": len(trials),
             "completed_trials": len(state.completed_trials),
             "best_trial": state.completed_trials[best_trial_id].to_dict()
             if best_trial_id
