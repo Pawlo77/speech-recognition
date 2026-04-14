@@ -98,6 +98,11 @@ Split usage is fixed by the dataset protocol in Section~\ref{sec:dataset}: Phase
 \end{tabular}
 \end{table}
 
+\subsection{Uniform Training Protocol}
+To ensure fair architectural comparison, all models are trained under an identical, deterministic protocol with shared hyperparameters and optimization controls. Model training follows the Adam optimizer (\cite{kingma2014adam}) with default parameters ($\beta_1 = 0.9, \beta_2 = 0.999, \epsilon = 10^{-8}$) and a learning rate of $3 \times 10^{-4}$. Gradient clipping is applied with a maximum norm threshold of $1.0$ to stabilize training on recurrent and attention-based architectures.
+
+The training regimen uses a batch size of $32$ across all experiments and model families, with $60$ training epochs and a learning-rate scheduler employing cosine annealing with linear warmup (\texttt{cosine\_annealing\_warmup}). A warmup of $5$ epochs linearly increases the learning rate from zero, followed by cosine decay to a minimum rate of $10^{-6}$. Early stopping is enforced with a patience of $10$ epochs without macro-F1 improvement on the validation set. Deterministic execution is enabled via fixed seed initialization, and validation is performed every epoch to track model convergence.
+
 \subsection{Phase 1: Feature Extraction Strategy (Q1)}
 Raw audio waveforms are highly inefficient for direct neural network processing due to a lack of semantic meaning at the sample level and high adjacent correlation \cite{purwins2019deep}. We transform the signal into time-frequency representations using the Short-Time Fourier Transform (STFT) \cite{allen1977short}.
 

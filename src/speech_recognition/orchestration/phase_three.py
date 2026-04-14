@@ -287,7 +287,12 @@ class PhaseThreeTrialSpec:
     ) -> ExperimentConfig:
         """Return the concrete config for this trial."""
 
-        dataset = replace(base_config.dataset, train_split="train_small", valid_split="valid_small")
+        dataset = replace(
+            base_config.dataset,
+            train_split="train_small",
+            valid_split="valid_small",
+            test_split="test_small",
+        )
         features = _feature_pipeline_for_trial(feature_name)
         optimizer = replace(
             base_config.optimizer, weight_decay=float(optimizer_payload["weight_decay"])

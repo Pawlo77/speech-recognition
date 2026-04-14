@@ -104,12 +104,12 @@ def _split_filename(split_name: str) -> str:
         return "small_training_list.txt"
     if split_name == "valid_small":
         return "small_validation_list.txt"
+    if split_name == "test_small":
+        return "small_testing_list.txt"
     if split_name == "train_extended":
         return "extended_training_list.txt"
     if split_name == "valid_extended":
         return "extended_validation_list.txt"
-    if split_name == "test":
-        return "testing_list.txt"
     if split_name == "test_extended":
         return "extended_testing_list.txt"
     raise ValueError(f"Unsupported split '{split_name}'.")

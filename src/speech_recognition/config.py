@@ -16,7 +16,7 @@ ALLOWED_TRAIN_SPLITS: set[str] = {"train_small", "train_extended"}
 """Allowed dataset splits for training."""
 ALLOWED_VALID_SPLITS: set[str] = {"valid_small", "valid_extended"}
 """Allowed dataset splits for validation."""
-ALLOWED_TEST_SPLITS: set[str] = {"test", "test_extended"}
+ALLOWED_TEST_SPLITS: set[str] = {"test_small", "test_extended"}
 """Allowed dataset splits for testing."""
 
 ALLOWED_FEATURE_PIPELINES: set[str] = {
@@ -110,7 +110,7 @@ class DatasetConfig:
     """Training split name."""
     valid_split: str = "valid_small"
     """Validation split name."""
-    test_split: str = "test"
+    test_split: str = "test_small"
     """Test split name."""
     root_dir: str = "data/kaggle_speech_commands"
     """Root directory for the speech commands dataset."""
@@ -128,7 +128,7 @@ class DatasetConfig:
         )
         _require(
             self.test_split in ALLOWED_TEST_SPLITS,
-            "test_split must be one of 'test' or 'test_extended'.",
+            "test_split must be one of 'test_small' or 'test_extended'.",
         )
         _require_str("root_dir", self.root_dir)
 
@@ -441,7 +441,7 @@ class TrainingControlConfig:
 
     epochs: int = 60
     """Number of training epochs."""
-    batch_size: int = 128
+    batch_size: int = 32
     """Mini-batch size."""
     gradient_accumulation_steps: int = 1
     """Number of steps to accumulate gradients."""

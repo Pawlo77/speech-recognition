@@ -255,7 +255,12 @@ class PhaseTwoTrialSpec:
     def to_config(self, base_config: ExperimentConfig) -> ExperimentConfig:
         """Return the concrete config for this trial."""
 
-        dataset = replace(base_config.dataset, train_split="train_small", valid_split="valid_small")
+        dataset = replace(
+            base_config.dataset,
+            train_split="train_small",
+            valid_split="valid_small",
+            test_split="test_small",
+        )
         model = replace(
             base_config.model, family=_model_family_for_trial(self.proxy_model), pretrained=False
         )

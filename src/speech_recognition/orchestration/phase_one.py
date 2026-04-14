@@ -259,7 +259,12 @@ class PhaseOneTrialSpec:
     def to_config(self, base_config: ExperimentConfig) -> ExperimentConfig:
         """Return the concrete config for this trial."""
 
-        dataset = replace(base_config.dataset, train_split="train_small", valid_split="valid_small")
+        dataset = replace(
+            base_config.dataset,
+            train_split="train_small",
+            valid_split="valid_small",
+            test_split="test_small",
+        )
         features = _feature_pipeline_for_trial(self.feature_name)
         model = replace(base_config.model, family=self.proxy_model, pretrained=False)
         phase_config = replace(base_config.phase, phase="phase_1")
