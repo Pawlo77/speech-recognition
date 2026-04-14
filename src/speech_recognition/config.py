@@ -231,7 +231,7 @@ class ModelConfig:
     """AST positional embedding mode (interp or learned)."""
     ast_hidden_size: int = 512
     """AST transformer hidden size."""
-    ast_num_hidden_layers: int = 10
+    ast_num_hidden_layers: int = 8
     """AST transformer depth."""
     ast_num_attention_heads: int = 8
     """AST attention head count."""
@@ -251,11 +251,11 @@ class ModelConfig:
     """SSAMBA convolution kernel size."""
     ssamba_expand: int = 2
     """SSAMBA expansion factor."""
-    ssamba_num_layers: int = 8
+    ssamba_num_layers: int = 6
     """Number of stacked SSAMBA blocks."""
-    xlstm_dim: int = 768
+    xlstm_dim: int = 704
     """xLSTM hidden/memory dimension."""
-    xlstm_num_blocks: int = 10
+    xlstm_num_blocks: int = 8
     """Number of xLSTM blocks in the stack."""
     xlstm_state_reset: bool = True
     """Whether xLSTM state resets between utterances."""
@@ -315,8 +315,8 @@ class ModelConfig:
             "ssamba_num_layers must be 1, 2, 4, 6, 8, 10, or 12.",
         )
         _require(
-            self.xlstm_dim in {32, 64, 128, 256, 384, 512, 768, 896, 1024},
-            "xlstm_dim must be one of {32, 64, 128, 256, 384, 512, 768, 896, 1024}.",
+            self.xlstm_dim in {32, 64, 128, 256, 384, 512, 704, 768, 896, 1024},
+            "xlstm_dim must be one of {32, 64, 128, 256, 384, 512, 704, 768, 896, 1024}.",
         )
         _require(
             self.xlstm_num_blocks in {1, 2, 4, 6, 8, 10, 12},

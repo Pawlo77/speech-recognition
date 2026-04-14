@@ -1,5 +1,6 @@
 """Unknown-class sample generation helpers for the dataset package."""
 
+import json
 import logging
 import math
 import random
@@ -81,7 +82,7 @@ def _pcm_add(left: bytes, right: bytes, sample_width: int) -> bytes:
 class UnknownSampleGenerationMixin:
     """Mixin that encapsulates __unknown__ sample synthesis and filtering."""
 
-    def _create_unknown_label_samples(self) -> None:
+    def _create_unknown_label_samples(self, minimum_total: int | None = None) -> None:
         """Create the __unknown__ label as interpolation of existing samples."""
 
         logger.info("Creating __unknown__ label samples as interpolation of existing samples.")
@@ -89,17 +90,19 @@ class UnknownSampleGenerationMixin:
         unknown_dir = self.dataset_root / "train" / "audio" / self.UNKNOWN_LABEL
         unknown_dir.mkdir(parents=True, exist_ok=True)
         existing_unknown_samples = len(list(unknown_dir.glob("*.wav")))
-        samples_to_create = self.unknown_label_samples_size - existing_unknown_samples
+        target_total = max(self.unknown_label_samples_size, minimum_total or 0)
+        samples_to_create = target_total - existing_unknown_samples
+        if samples_to_create <= 0:
+            return
 
         samples_by_label: dict[str, list[Path]] = {}
         padded_dir_name = getattr(self, "PADDED_AUDIO_DIR", "__padded_1sec__")
         for label_dir in (self.dataset_root / "train" / "audio").iterdir():
-            if label_dir.is_dir() and label_dir.name not in (
-                "_background_noise_",
-                self.UNKNOWN_LABEL,
-                padded_dir_name,
-            ):
-                samples_by_label[label_dir.name] = sorted(label_dir.glob("*.wav"))
+            if not label_dir.is_dir():
+                continue
+            if label_dir.name in ("_background_noise_", self.UNKNOWN_LABEL, padded_dir_name):
+                continue
+            samples_by_label[label_dir.name] = sorted(label_dir.glob("*.wav"))
 
         available_labels = [label for label, samples in samples_by_label.items() if samples]
         if len(available_labels) < 2:
@@ -164,6 +167,28 @@ class UnknownSampleGenerationMixin:
                     unknown_wav.setsampwidth(source_wav.getsampwidth())
                     unknown_wav.setframerate(source_wav.getframerate())
                 unknown_wav.writeframes(blended_frames)
+
+            synthetic_metadata_path = unknown_sample_path.with_suffix(".sources.json")
+            synthetic_metadata = {
+                "synthetic_relative_path": (
+                    unknown_sample_path.relative_to(
+                        self.dataset_root / "train" / "audio"
+                    ).as_posix()
+                ),
+                "source_relative_paths": [
+                    source_path.relative_to(self.dataset_root / "train" / "audio").as_posix()
+                    for source_path in source_paths
+                ],
+                "source_labels": [source_path.parent.name for source_path in source_paths],
+            }
+            synthetic_metadata_path.write_text(
+                json.dumps(synthetic_metadata, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            register_sources = getattr(self, "_register_synthetic_unknown_sources", None)
+            if callable(register_sources):
+                register_sources(unknown_sample_path, source_paths)
 
             used_source_sets.add(source_key)
             created_samples += 1

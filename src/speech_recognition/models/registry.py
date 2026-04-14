@@ -6,6 +6,7 @@ from typing import Final, cast
 
 import torch
 from torch import Tensor, nn
+from torch.nn import init as nn_init
 
 from ..config import ModelConfig
 
@@ -31,6 +32,16 @@ MLP_MIXER_MODEL_NAME: Final[str] = "gmixer_24_224"
 """Official timm MLP-family model used for the mlp_mixer track."""
 
 
+def _apply_kaiming_initialization(module: nn.Module) -> None:
+    """Apply Kaiming normal initialization to trainable affine and convolution layers."""
+
+    for child_module in module.modules():
+        if isinstance(child_module, nn.Conv1d | nn.Conv2d | nn.Linear):
+            nn_init.kaiming_normal_(child_module.weight, nonlinearity="relu")
+            if child_module.bias is not None:
+                nn_init.zeros_(child_module.bias)
+
+
 class ASTBackboneWrapper(nn.Module):
     """Wrapper that normalizes AST logits extraction for transformers models."""
 
@@ -42,6 +53,21 @@ class ASTBackboneWrapper(nn.Module):
         values = inputs.squeeze(1).transpose(1, 2)
         outputs = self.model(input_values=values)
         return cast(Tensor, outputs.logits)
+
+
+class LogitNormalizationWrapper(nn.Module):
+    """Apply optional L2 normalization to classifier logits."""
+
+    def __init__(self, model: nn.Module, normalize_logits: bool) -> None:
+        super().__init__()
+        self.model = model
+        self.normalize_logits = normalize_logits
+
+    def forward(self, inputs: Tensor) -> Tensor:
+        logits = self.model(inputs)
+        if self.normalize_logits:
+            logits = nn.functional.normalize(logits, p=2.0, dim=-1)
+        return logits
 
 
 class KWSModelAdapter(nn.Module):
@@ -239,7 +265,16 @@ def _build_ast_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool
         max_length=DEFAULT_TARGET_FRAMES,
         num_mel_bins=DEFAULT_INPUT_BINS,
     )
-    return ASTBackboneWrapper(ast_for_audio_cls(config)), "transformers", False
+    ast_model = ast_for_audio_cls(config)
+    if model_config.ast_head == "mlp_256" and hasattr(ast_model, "classifier"):
+        ast_model.classifier = nn.Sequential(
+            nn.Linear(int(model_config.ast_hidden_size), 256),
+            nn.GELU(),
+            nn.Linear(256, model_config.num_classes),
+        )
+    model = ASTBackboneWrapper(ast_model)
+    _apply_kaiming_initialization(model)
+    return model, "transformers", False
 
 
 def _build_convnext_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool]:
@@ -259,6 +294,7 @@ def _build_convnext_backbone(model_config: ModelConfig) -> tuple[nn.Module, str,
             padding=original.padding,
             bias=original.bias is not None,
         )
+        _apply_kaiming_initialization(model)
         return model, "torchvision", False
     except Exception as torchvision_err:
         try:
@@ -271,6 +307,7 @@ def _build_convnext_backbone(model_config: ModelConfig) -> tuple[nn.Module, str,
                 num_classes=model_config.num_classes,
                 drop_path_rate=float(model_config.stochastic_depth),
             )
+            _apply_kaiming_initialization(model)
             return model, "timm", False
         except Exception as timm_err:
             raise RuntimeError(
@@ -331,7 +368,9 @@ def _build_ssamba_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, b
                 pooled = hidden.mean(dim=1)
             return self.head(pooled)
 
-    return MambaHead(), "mamba-ssm", False
+    model = MambaHead()
+    _apply_kaiming_initialization(model)
+    return model, "mamba-ssm", False
 
 
 def _build_xlstm_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool]:
@@ -385,7 +424,9 @@ def _build_xlstm_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bo
             pooled = hidden[:, -1, :] if self.output_mode == "final" else hidden.mean(dim=1)
             return self.head(pooled)
 
-    return XLSTMHead(), "xlstm", False
+    model = XLSTMHead()
+    _apply_kaiming_initialization(model)
+    return model, "xlstm", False
 
 
 def _build_mlp_mixer_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool]:
@@ -403,4 +444,6 @@ def _build_mlp_mixer_backbone(model_config: ModelConfig) -> tuple[nn.Module, str
         num_classes=model_config.num_classes,
         drop_rate=float(model_config.dropout),
     )
+    model = LogitNormalizationWrapper(model, normalize_logits=model_config.mlp_head_l2_norm)
+    _apply_kaiming_initialization(model)
     return model, "timm", False

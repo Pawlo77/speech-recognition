@@ -7,7 +7,10 @@ export PYTHONPATH=.
 export PYTORCH_ENABLE_MPS_FALLBACK=1
 export OMP_NUM_THREADS=1
 
-.PHONY: help install clean test pre-commit pre-commit-all datasets phase-1 phase-2 phase-3 phase-4 full-pipeline full-pipeline-check mlflow
+.PHONY: help install clean test pre-commit pre-commit-all datasets phase-1 phase-2 phase-3 phase-4 status full-pipeline full-pipeline-check eta-estimate estimate-ram mlflow
+
+RUN_ROOT ?= outputs/full-pipeline-check
+BATCH_SIZES ?= 1 8 32
 
 ############################
 # Repo Maintenance Targets #
@@ -26,8 +29,11 @@ help:
 	@echo "  make phase-2                - Run phase 2 orchestration"
 	@echo "  make phase-3                - Run phase 3 orchestration"
 	@echo "  make phase-4                - Run phase 4 orchestration"
+	@echo "  make status                 - Show current pipeline state"
 	@echo "  make full-pipeline          - Run the full pipeline"
 	@echo "  make full-pipeline-check    - Run all settings for one seed with few training steps"
+	@echo "  make eta-estimate           - Estimate full-pipeline ETA from saved state files"
+	@echo "  make estimate-ram           - Estimate RAM footprint by model family"
 	@echo "  make mlflow                 - Launch MLflow UI for local runs"
 
 # install dependencies and pre-commit hooks
@@ -76,6 +82,10 @@ phase-3:
 phase-4:
 	uv run speech-recognition phase-4 --output-dir outputs --run-name default
 
+# Show pipeline state for the default run namespace
+status:
+	uv run speech-recognition status --output-dir outputs --run-name default
+
 # Execute the full pipeline
 full-pipeline:
 	uv run speech-recognition run --output-dir outputs --run-name default
@@ -91,22 +101,22 @@ full-pipeline-check:
 	export TQDM_DISABLE=1; \
 	echo "Full pipeline check logs: $$LOG_DIR"; \
 	phase_1_start="$$(date +%s)"; \
-	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-1 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-1.log"; \
+	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-1 --set training.batch_size=4 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-1.log"; \
 	phase_1_end="$$(date +%s)"; \
 	phase_1_secs="$$((phase_1_end - phase_1_start))"; \
 	echo "phase-1 duration: $${phase_1_secs}s"; \
 	phase_2_start="$$(date +%s)"; \
-	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-2 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-2.log"; \
+	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-2 --set training.batch_size=4 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-2.log"; \
 	phase_2_end="$$(date +%s)"; \
 	phase_2_secs="$$((phase_2_end - phase_2_start))"; \
 	echo "phase-2 duration: $${phase_2_secs}s"; \
 	phase_3_start="$$(date +%s)"; \
-	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-3 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-3.log"; \
+	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-3 --set training.batch_size=4 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-3.log"; \
 	phase_3_end="$$(date +%s)"; \
 	phase_3_secs="$$((phase_3_end - phase_3_start))"; \
 	echo "phase-3 duration: $${phase_3_secs}s"; \
 	phase_4_start="$$(date +%s)"; \
-	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-4 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-4.log"; \
+	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-4 --set training.batch_size=4 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-4.log"; \
 	phase_4_end="$$(date +%s)"; \
 	phase_4_secs="$$((phase_4_end - phase_4_start))"; \
 	echo "phase-4 duration: $${phase_4_secs}s"; \
@@ -115,7 +125,7 @@ full-pipeline-check:
 	echo "smoke_total_seconds=$$smoke_total_secs" | tee "$$LOG_DIR/summary.txt"; \
 	echo "estimated_full_seconds_by_trial_scaling=$$estimated_full_secs" | tee -a "$$LOG_DIR/summary.txt"; \
 	echo "estimated_full_hms=$$((estimated_full_secs / 3600))h $$(((estimated_full_secs % 3600) / 60))m $$((estimated_full_secs % 60))s" | tee -a "$$LOG_DIR/summary.txt"; \
-	uv run python -m speech_recognition.orchestration.eta_estimate --run-root "$$RUN_ROOT" | tee -a "$$LOG_DIR/summary.txt"; \
+	uv run python scripts/eta_estimate.py --run-root "$$RUN_ROOT" | tee -a "$$LOG_DIR/summary.txt"; \
 	echo "Logs saved under $$LOG_DIR"; \
 	echo "Note: compare trial-scaled ETA with historical P50/P90 ETA bands above."
 
@@ -126,3 +136,11 @@ full-pipeline-check:
 # Launch MLflow UI for local runs
 mlflow:
 	uv run mlflow ui --backend-store-uri mlruns
+
+# Estimate full-pipeline ETA from saved phase state files.
+eta-estimate:
+	uv run python scripts/eta_estimate.py --run-root "$(RUN_ROOT)"
+
+# Estimate rough RAM usage by model family for one or more batch sizes.
+estimate-ram:
+	uv run python scripts/estimate_ram.py --batch-sizes $(BATCH_SIZES)

@@ -1,16 +1,19 @@
 # Speech Recognition (KWS)
 
-This repository implements a controlled keyword-spotting pipeline for the Kaggle TensorFlow Speech Recognition Challenge. The objective is methodological comparability rather than ad hoc model tuning.
+Repository for a reproducible keyword-spotting (KWS) experimentation stack on the Kaggle TensorFlow Speech Recognition Challenge.
 
 ## Scope
 
-- Task: 12-class single-word classification: 10 target commands + `__unknown__` + `__silence__`.
-- Input: 1-second audio clips at 16 kHz, with observed outliers ranging from 0.37 to 95.18 seconds.
-- Core focus: feature ablation, architecture comparison, non-command handling, resumable training, and held-out evaluation.
+- Problem framing: 12-class single-word classification (10 commands + `__unknown__` + `__silence__`) on 16 kHz, 1-second clips.
+- What this repo provides: dataset preparation, feature extraction modules, model adapters, phase-based orchestration, tracking, and reproducible evaluation artifacts.
+- Engineering emphasis: deterministic preprocessing, resumable sweeps, process-isolated trials, and machine-readable run state under `outputs/`.
+- Intended use: run controlled comparisons across features, optimization settings, architectures, and non-command handling strategies.
+
+Methodological rationale, statistical interpretation, and research discussion are documented in [report](report/build_latex/report.pdf). The README focuses on repository usage and implementation boundaries.
 
 ## Methodological Blueprint
 
-The project follows the four-phase plan documented in [outputs/report/report.tex](outputs/report/report.tex):
+The implementation follows this four-phase execution plan (methodological detail remains in [report](report/build_latex/report.pdf)):
 
 1. Phase 1: feature strategy ablation on `train_small` and `valid_small`.
 2. Phase 2: global hyperparameter tuning.
@@ -52,6 +55,8 @@ For duration handling, short clips are never dropped. In dataset preprocessing m
 
 This procedure avoids duplicating the same synthetic sample and keeps the non-command classes structurally separated from the target commands.
 
+For extended splits, unknown candidates are deduplicated by audio-content hash first; if the unknown pool is still too small, synthetic unknowns are generated as a top-up until split targets are met (or generation attempts are exhausted).
+
 ## Feature Extraction and Model Adapters
 
 Feature extraction is implemented as composable PyTorch `nn.Module`s backed by `torchaudio`.
@@ -64,6 +69,8 @@ Feature extraction is implemented as composable PyTorch `nn.Module`s backed by `
 
 Model adapters accept `[B, 1, F, T]` tensors, normalize temporal length by padding or truncation, and expose profiling through `fvcore` using `FlopCountAnalysis` and `parameter_count`. The class count is fixed at 12.
 
+Current defaults target a comparable ~25M-parameter regime across AST/SSAMBA/xLSTM while keeping ConvNeXt/MLP-Mixer in a similar band. Measured counts are exported to `outputs/model_parameter_counts.csv`.
+
 ## Phase Sweep Protocol
 
 The experiment funnel is designed for idempotent reruns.
@@ -73,7 +80,9 @@ The experiment funnel is designed for idempotent reruns.
 - Phase 3 sweeps 90 architecture/seed combinations.
 - Phase 4 evaluates 45 held-out configurations derived from the top three Phase 3 backbones across three fixed seeds.
 
-Every phase persists a local state file and a best-selection artifact before the next trial begins. If a subprocess crashes or the machine reboots, rerunning the same Makefile target resumes from the most recent valid state file.
+Every phase persists a local state file and a best-selection artifact before the next trial begins. If a subprocess crashes or the machine reboots, rerunning the same Makefile target resumes from the most recent valid state file in the same `--output-dir` and `--run-name` namespace.
+
+Phase 4 winner selection is seed-aggregated by method/backbone configuration, then ranked by mean non-command macro-F1 with leakage and false-trigger tie-breakers.
 
 ## Phase 4 Evaluation
 
@@ -93,9 +102,11 @@ $$
 
 Evaluation also tracks wall-clock inference latency after a 50-iteration warmup and records `inference_latency_ms_mean` alongside the F1 metrics. In Phase 4, data loading additionally applies explicit silence up-weighting and conditionally augments `__unknown__` via blending when unknown support falls below the mean target-command support.
 
+Held-out test evaluation runs for all completed Phase 4 trials and writes per-trial test predictions; method-level ensemble metrics are computed from those prediction artifacts.
+
 ## Reproducibility Metadata
 
-Each run persists a reproducibility snapshot and the active phase state. The stored metadata includes the random seed, runtime environment, and the git commit hash for the repository version under test.
+Each run persists a reproducibility snapshot and the active phase state. The stored metadata includes the random seed, runtime environment, git commit hash, git branch/dirty state, Python/platform details, installed package versions, and hardware context (RAM and disk capacity).
 
 ## Quick Start
 
@@ -109,7 +120,7 @@ KAGGLE_API_TOKEN=your_token
 Run the main checks and pipeline entry points:
 
 ```bash
-uv sync
+make install
 make datasets
 make test
 make pre-commit-all
@@ -122,6 +133,26 @@ make phase-4
 
 # or all at once with automatic resumption
 make full-pipeline
+```
+
+Useful Make targets:
+
+```bash
+make status
+```
+
+Utility scripts for planning and capacity checks:
+
+```bash
+# historical full-pipeline ETA from saved phase state files
+make eta-estimate
+
+# rough RAM estimate (params + activations approximation) by model family
+make estimate-ram
+
+# override defaults when needed
+make eta-estimate RUN_ROOT=outputs/full-pipeline-check
+make estimate-ram BATCH_SIZES="1 8 32"
 ```
 
 ## MLflow

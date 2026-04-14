@@ -96,6 +96,29 @@ def test_phase_four_sweep_skips_completed_trials_and_applies_strict_gate(
         encoding="utf-8",
     )
 
+    phase_two_best_optim_path = output_dir / "phase_2" / "best_optim.json"
+    phase_two_best_optim_path.parent.mkdir(parents=True, exist_ok=True)
+    phase_two_best_optim_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "trial": {
+                    "trial_id": (
+                        "trial_01_mel_spectrogram_convnext_cosine_annealing_warmup_wd_0.1_seed_0"
+                    ),
+                    "feature_name": "mel_spectrogram",
+                    "proxy_model": "convnext",
+                    "weight_decay": 0.1,
+                    "scheduler_name": "reduce_on_plateau",
+                    "seed": 0,
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
     completed_trial = PhaseFourTrialSpec(
         trial_id="trial_01_flat_multiclass_trial_01_ast_linear_interp_dropout_0.1_seed_0",
         method="flat_multiclass",
@@ -182,6 +205,8 @@ def test_phase_four_sweep_skips_completed_trials_and_applies_strict_gate(
             assert config_payload["evaluation"]["warmup_iterations"] == 50
             assert config_payload["evaluation"]["max_core_command_f1_drop"] == pytest.approx(0.01)
             assert config_payload["model"]["family"] == "convnext"
+            assert config_payload["optimizer"]["weight_decay"] == pytest.approx(0.1)
+            assert config_payload["scheduler"]["name"] == "reduce_on_plateau"
             assert config_payload["seed"] == 42
 
         child_state_path = output_dir / "phase_4" / "runs" / run_name / "state.json"

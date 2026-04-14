@@ -33,6 +33,18 @@ PHASE_THREE_AST_HEADS: tuple[str, str] = ("linear", "mlp_256")
 PHASE_THREE_AST_POSITIONAL_EMBEDDINGS: tuple[str, str] = ("interp", "learned")
 """AST positional embedding modes to sweep."""
 
+PHASE_THREE_AST_HIDDEN_SIZE: int = 512
+"""AST hidden size fixed for ~25M-target phase-3 comparisons."""
+
+PHASE_THREE_AST_NUM_LAYERS: int = 8
+"""AST depth fixed for ~25M-target phase-3 comparisons."""
+
+PHASE_THREE_AST_NUM_HEADS: int = 8
+"""AST attention heads fixed for ~25M-target phase-3 comparisons."""
+
+PHASE_THREE_AST_INTERMEDIATE_SIZE: int = 2048
+"""AST FFN width fixed for ~25M-target phase-3 comparisons."""
+
 PHASE_THREE_CONVNEXT_STOCH_DEPTHS: tuple[float, float] = (0.0, 0.2)
 """ConvNeXt stochastic depth values to sweep."""
 
@@ -48,8 +60,23 @@ PHASE_THREE_SSAMBA_CLS: tuple[bool, bool] = (True, False)
 PHASE_THREE_SSAMBA_STRIDES_MS: tuple[int, int] = (10, 5)
 """SSAMBA temporal stride values (ms) to sweep."""
 
-PHASE_THREE_XLSTM_DIMS: tuple[int, int] = (768, 896)
+PHASE_THREE_SSAMBA_D_MODEL: int = 768
+"""SSAMBA hidden size fixed for ~25M-target phase-3 comparisons."""
+
+PHASE_THREE_SSAMBA_D_STATE: int = 64
+"""SSAMBA state size fixed for ~25M-target phase-3 comparisons."""
+
+PHASE_THREE_SSAMBA_EXPAND: int = 2
+"""SSAMBA expansion factor fixed for ~25M-target phase-3 comparisons."""
+
+PHASE_THREE_SSAMBA_NUM_LAYERS: int = 6
+"""SSAMBA depth fixed for ~25M-target phase-3 comparisons."""
+
+PHASE_THREE_XLSTM_DIMS: tuple[int, int] = (704, 768)
 """xLSTM hidden/memory dimensions to sweep."""
+
+PHASE_THREE_XLSTM_NUM_BLOCKS: int = 8
+"""xLSTM stack depth fixed for ~25M-target phase-3 comparisons."""
 
 PHASE_THREE_XLSTM_STATE_RESETS: tuple[bool, bool] = (True, False)
 """xLSTM state reset configurations to sweep."""
@@ -326,6 +353,10 @@ class PhaseThreeTrialSpec:
                 dropout=float(params["dropout"]),
                 ast_head=str(params["head"]),
                 ast_positional_embedding=str(params["positional_embedding"]),
+                ast_hidden_size=int(params["hidden_size"]),
+                ast_num_hidden_layers=int(params["num_layers"]),
+                ast_num_attention_heads=int(params["num_heads"]),
+                ast_intermediate_size=int(params["intermediate_size"]),
             )
         if family == "convnext":
             return replace(
@@ -342,6 +373,10 @@ class PhaseThreeTrialSpec:
                 ssamba_pooling=str(params["pooling"]),
                 ssamba_use_cls=bool(params["use_cls"]),
                 ssamba_stride_ms=int(params["stride_ms"]),
+                ssamba_d_model=int(params["d_model"]),
+                ssamba_d_state=int(params["d_state"]),
+                ssamba_expand=int(params["expand"]),
+                ssamba_num_layers=int(params["num_layers"]),
             )
         if family == "xlstm":
             return replace(
@@ -349,6 +384,7 @@ class PhaseThreeTrialSpec:
                 family=family,
                 pretrained=False,
                 xlstm_dim=int(params["dimension"]),
+                xlstm_num_blocks=int(params["num_blocks"]),
                 xlstm_state_reset=bool(params["state_reset"]),
                 xlstm_output_mode=str(params["output_mode"]),
             )
@@ -383,6 +419,10 @@ def _build_ast_trials() -> tuple[PhaseThreeTrialSpec, ...]:
                                 "dropout": dropout,
                                 "head": head,
                                 "positional_embedding": positional_embedding,
+                                "hidden_size": PHASE_THREE_AST_HIDDEN_SIZE,
+                                "num_layers": PHASE_THREE_AST_NUM_LAYERS,
+                                "num_heads": PHASE_THREE_AST_NUM_HEADS,
+                                "intermediate_size": PHASE_THREE_AST_INTERMEDIATE_SIZE,
                             },
                         )
                     )
@@ -433,6 +473,10 @@ def _build_ssamba_trials() -> tuple[PhaseThreeTrialSpec, ...]:
                                 "pooling": pooling,
                                 "use_cls": use_cls,
                                 "stride_ms": stride_ms,
+                                "d_model": PHASE_THREE_SSAMBA_D_MODEL,
+                                "d_state": PHASE_THREE_SSAMBA_D_STATE,
+                                "expand": PHASE_THREE_SSAMBA_EXPAND,
+                                "num_layers": PHASE_THREE_SSAMBA_NUM_LAYERS,
                             },
                         )
                     )
@@ -457,6 +501,7 @@ def _build_xlstm_trials() -> tuple[PhaseThreeTrialSpec, ...]:
                             seed=seed,
                             architecture_params={
                                 "dimension": dimension,
+                                "num_blocks": PHASE_THREE_XLSTM_NUM_BLOCKS,
                                 "state_reset": state_reset,
                                 "output_mode": output_mode,
                             },

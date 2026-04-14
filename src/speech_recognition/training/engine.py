@@ -302,6 +302,9 @@ class TrainingEngine:
         last_validation: dict[str, float] = {}
         last_checkpoint_path: Path | None = None
         stop_training = False
+        best_validation_macro_f1 = float("-inf")
+        epochs_without_improvement = 0
+        completed_epoch = start_epoch
 
         epoch_indices = range(start_epoch, self.training_config.epochs)
         for epoch in tqdm(
@@ -352,10 +355,7 @@ class TrainingEngine:
                         stop_training = True
                         break
                 batch_offset = 0
-                if (
-                    val_loader is not None
-                    and (epoch + 1) % self.training_config.validate_every_n_epochs == 0
-                ):
+                if val_loader is not None:
                     last_validation = self.evaluate(val_loader)
                     logger.info(
                         "[val] epoch=%d/%d validation_loss=%.6f validation_macro_f1=%.6f",
@@ -381,6 +381,25 @@ class TrainingEngine:
                             )
                         except Exception:
                             logger.exception("tracker.log_training_metrics failed")
+                    current_validation_macro_f1 = last_validation.get("validation_macro_f1", 0.0)
+                    if current_validation_macro_f1 > best_validation_macro_f1:
+                        best_validation_macro_f1 = current_validation_macro_f1
+                        epochs_without_improvement = 0
+                    else:
+                        epochs_without_improvement += 1
+                        if (
+                            self.training_config.early_stopping_patience >= 0
+                            and epochs_without_improvement
+                            >= self.training_config.early_stopping_patience
+                        ):
+                            logger.info(
+                                (
+                                    "[train] early stopping triggered after %d epochs without "
+                                    "validation_macro_f1 improvement"
+                                ),
+                                epochs_without_improvement,
+                            )
+                            stop_training = True
                 if self.scheduler is not None:
                     scheduler_step = getattr(self.scheduler, "step", None)
                     if callable(scheduler_step):
@@ -409,6 +428,7 @@ class TrainingEngine:
                         )
                     except Exception:
                         logger.exception("tracker.log_training_metrics failed")
+                completed_epoch = epoch + 1
                 if stop_training:
                     break
             except KeyboardInterrupt:
@@ -416,7 +436,7 @@ class TrainingEngine:
                 raise
 
         return {
-            "epoch": self.training_config.epochs,
+            "epoch": completed_epoch,
             "step": global_step,
             "checkpoint_path": str(last_checkpoint_path) if last_checkpoint_path else None,
             **last_validation,

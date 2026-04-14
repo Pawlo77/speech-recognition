@@ -3,6 +3,7 @@
 import csv
 import hashlib
 import importlib
+import json
 import logging
 import random
 import shutil
@@ -178,13 +179,13 @@ class SpeechCommandsDataset(UnknownSampleGenerationMixin):
         ).exists():
             self._split_background_noise_samples()
 
-        self._write_unknown_origin_map()
-
         if (
             not self.use_smaller_dataset and self.use_extended_dataset
             # and not (self.dataset_root / "train" / "audio" / self.UNKNOWN_LABEL).exists()
         ):
             self._create_unknown_label_samples()
+
+        self._write_unknown_origin_map()
 
         self._regenerate_split_lists()
 
@@ -351,6 +352,23 @@ class SpeechCommandsDataset(UnknownSampleGenerationMixin):
             for wav_file in sorted(label_dir.glob("*.wav")):
                 rel_path = wav_file.relative_to(train_audio_dir).as_posix()
                 rows.append((rel_path, original_label, self.UNKNOWN_LABEL))
+
+        unknown_dir = train_audio_dir / self.UNKNOWN_LABEL
+        if unknown_dir.exists():
+            for metadata_file in sorted(unknown_dir.glob("*.sources.json")):
+                try:
+                    payload = json.loads(metadata_file.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    logger.warning("Skipping malformed synthetic metadata file: %s", metadata_file)
+                    continue
+
+                synthetic_rel_path = payload.get("synthetic_relative_path")
+                source_labels = payload.get("source_labels")
+                if not isinstance(synthetic_rel_path, str) or not isinstance(source_labels, list):
+                    continue
+                for source_label in source_labels:
+                    if isinstance(source_label, str) and source_label:
+                        rows.append((synthetic_rel_path, source_label, self.UNKNOWN_LABEL))
 
         csv_path = self.dataset_root / self.UNKNOWN_ORIGIN_CSV
         csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -835,6 +853,33 @@ class SpeechCommandsDataset(UnknownSampleGenerationMixin):
     def _canonical_label_from_rel_path(self, rel_path: str) -> str:
         return self._canonicalize_label(Path(rel_path).parts[0])
 
+    def _raw_label_from_rel_path(self, rel_path: str) -> str:
+        """Return the original top-level label directory name for a relative path."""
+
+        return Path(rel_path).parts[0]
+
+    def _is_original_unknown_rel_path(self, rel_path: str) -> bool:
+        """Return whether a path belongs to an original non-target, non-silence unknown label."""
+
+        raw_label = self._raw_label_from_rel_path(rel_path)
+        return raw_label not in {
+            *self.TARGET_COMMAND_LABELS,
+            self.BACKGROUND_NOISE_LABEL,
+            self.UNKNOWN_LABEL,
+            self.PADDED_AUDIO_DIR,
+        }
+
+    def _collect_synthetic_unknown_rel_paths(self, train_audio_dir: Path) -> list[str]:
+        """Collect generated unknown WAV paths from the synthetic unknown directory."""
+
+        unknown_dir = train_audio_dir / self.UNKNOWN_LABEL
+        if not unknown_dir.exists():
+            return []
+        return sorted(
+            wav_file.relative_to(train_audio_dir).as_posix()
+            for wav_file in unknown_dir.glob("*.wav")
+        )
+
     def _unknown_dedup_key(self, rel_path: str, train_audio_dir: Path) -> str:
         """Return dedup key for unknown sample using content hash."""
 
@@ -897,30 +942,48 @@ class SpeechCommandsDataset(UnknownSampleGenerationMixin):
         command_val = sorted([rel for rel in official_val if self._is_target_rel_path(rel)])
         command_test = sorted([rel for rel in official_test if self._is_target_rel_path(rel)])
 
-        unknown_pool = [
-            rel
-            for rel in sorted(official_train + sorted(official_val) + sorted(official_test))
-            if self._canonical_label_from_rel_path(rel) == self.UNKNOWN_LABEL
+        unknown_train_target = min(len(command_train), self.MAX_EXTENDED_UNKNOWN_PER_SPLIT)
+        unknown_val_target = len(command_val)
+        unknown_test_target = len(command_test)
+        required_unknown = unknown_train_target + unknown_val_target + unknown_test_target
+
+        all_split_rel_paths = sorted(official_train + sorted(official_val) + sorted(official_test))
+        original_unknown_pool = [
+            rel for rel in all_split_rel_paths if self._is_original_unknown_rel_path(rel)
         ]
         seen_unknown: set[str] = set()
         dedup_unknown_pool: list[str] = []
-        for rel in unknown_pool:
+
+        for rel in original_unknown_pool:
             key = self._unknown_dedup_key(rel, train_audio_dir)
             if key in seen_unknown:
                 continue
             seen_unknown.add(key)
             dedup_unknown_pool.append(rel)
-        rng.shuffle(dedup_unknown_pool)
 
-        unknown_train_target = min(len(command_train), self.MAX_EXTENDED_UNKNOWN_PER_SPLIT)
-        unknown_val_target = len(command_val)
-        unknown_test_target = len(command_test)
-        required_unknown = unknown_train_target + unknown_val_target + unknown_test_target
+        if len(dedup_unknown_pool) < required_unknown:
+            synth_attempts = 0
+            while len(dedup_unknown_pool) < required_unknown and synth_attempts < 3:
+                synth_attempts += 1
+                missing = required_unknown - len(dedup_unknown_pool)
+                current_synthetic = len(self._collect_synthetic_unknown_rel_paths(train_audio_dir))
+                self._create_unknown_label_samples(minimum_total=current_synthetic + missing)
+
+                for rel in self._collect_synthetic_unknown_rel_paths(train_audio_dir):
+                    key = self._unknown_dedup_key(rel, train_audio_dir)
+                    if key in seen_unknown:
+                        continue
+                    seen_unknown.add(key)
+                    dedup_unknown_pool.append(rel)
+
         if len(dedup_unknown_pool) < required_unknown:
             raise RuntimeError(
-                "Not enough deduplicated unknown samples to build balanced extended splits "
-                f"(required={required_unknown}, available={len(dedup_unknown_pool)})."
+                "Not enough unknown samples after dedup + synthetic top-up to build "
+                f"balanced extended splits (required={required_unknown}, "
+                f"available={len(dedup_unknown_pool)})."
             )
+
+        rng.shuffle(dedup_unknown_pool)
 
         unknown_train = dedup_unknown_pool[:unknown_train_target]
         offset = unknown_train_target

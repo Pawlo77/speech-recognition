@@ -1,0 +1,27 @@
+Estimating RAM per model (params + activations approximation)
+
+Family: ast
+  Batch 1: params=121.01MB, activations=56.93MB, total≈177.93MB
+  Batch 8: params=121.01MB, activations=455.42MB, total≈576.43MB
+  Batch 32: params=121.01MB, activations=1.78GB, total≈1.90GB
+
+Family: convnext
+  Batch 1: params=106.15MB, activations=35.08MB, total≈141.23MB
+  Batch 8: params=106.15MB, activations=280.67MB, total≈386.81MB
+  Batch 32: params=106.15MB, activations=1.10GB, total≈1.20GB
+
+Family: mlp_mixer
+  Batch 1: params=92.10MB, activations=179.89MB, total≈271.99MB
+  Batch 8: params=92.10MB, activations=1.41GB, total≈1.50GB
+  Batch 32: params=92.10MB, activations=5.62GB, total≈5.71GB
+
+Family: ssamba
+Mamba SSM macOS: Running on Apple Silicon with MPS acceleration
+  Batch 1: params=121.87MB, activations=15.18MB, total≈137.05MB
+  Batch 8: params=121.87MB, activations=121.46MB, total≈243.33MB
+  Batch 32: params=121.87MB, activations=485.83MB, total≈607.70MB
+
+Family: xlstm
+  Batch 1: params=136.49MB, activations=70.14MB, total≈206.63MB
+  Batch 8: params=136.49MB, activations=561.09MB, total≈697.59MB
+  Batch 32: params=136.49MB, activations=2.19GB, total≈2.33GB

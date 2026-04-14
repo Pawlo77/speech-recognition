@@ -18,6 +18,7 @@ from tqdm.auto import tqdm
 from ..config import ExperimentConfig, ModelConfig
 from .phase_one import _atomic_write_json, _read_json, _serialize
 from .phase_three import PhaseThreeTrialRecord
+from .phase_two import _scheduler_config_for_trial
 from .services import build_isolated_subprocess_env
 
 PHASE_FOUR_STATE_SCHEMA_VERSION: int = 1
@@ -78,7 +79,7 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _phase_four_score(payload: Mapping[str, Any]) -> dict[str, float]:
+def _phase_four_score(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Extract phase-4 metrics from a child payload."""
 
     if not isinstance(payload, Mapping):
@@ -90,6 +91,7 @@ def _phase_four_score(payload: Mapping[str, Any]) -> dict[str, float]:
             "inference_latency_ms_mean": 0.0,
             "unknown_to_command_leakage": 0.0,
             "silence_false_trigger_rate": 0.0,
+            "per_class": {},
         }
 
     metrics = payload.get("metrics") if isinstance(payload.get("metrics"), Mapping) else {}
@@ -115,6 +117,10 @@ def _phase_four_score(payload: Mapping[str, Any]) -> dict[str, float]:
         "silence_false_trigger_rate",
         metrics.get("silence_false_trigger_rate", 0.0),
     )
+    per_class = payload.get(
+        "per_class",
+        metrics.get("per_class", {}),
+    )
 
     return {
         "core_command_macro_f1": float(core_command_macro_f1),
@@ -124,10 +130,11 @@ def _phase_four_score(payload: Mapping[str, Any]) -> dict[str, float]:
         "inference_latency_ms_mean": float(inference_latency_ms_mean),
         "unknown_to_command_leakage": float(unknown_to_command_leakage),
         "silence_false_trigger_rate": float(silence_false_trigger_rate),
+        "per_class": per_class,
     }
 
 
-def _phase_four_score_recursive(payload: Mapping[str, Any]) -> dict[str, float]:
+def _phase_four_score_recursive(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Extract phase-4 metrics from nested child payload structures."""
 
     metrics = _phase_four_score(payload)
@@ -180,6 +187,10 @@ def _build_backbone_model_config(backbone_trial: PhaseThreeTrialRecord) -> Model
             dropout=float(params["dropout"]),
             ast_head=str(params.get("head", "linear")),
             ast_positional_embedding=str(params.get("positional_embedding", "interp")),
+            ast_hidden_size=int(params.get("hidden_size", 512)),
+            ast_num_hidden_layers=int(params.get("num_layers", 10)),
+            ast_num_attention_heads=int(params.get("num_heads", 8)),
+            ast_intermediate_size=int(params.get("intermediate_size", 2048)),
         )
     if family == "convnext":
         return ModelConfig(
@@ -194,12 +205,17 @@ def _build_backbone_model_config(backbone_trial: PhaseThreeTrialRecord) -> Model
             ssamba_pooling=str(params.get("pooling", "mean")),
             ssamba_use_cls=bool(params.get("use_cls", True)),
             ssamba_stride_ms=int(params.get("stride_ms", 10)),
+            ssamba_d_model=int(params.get("d_model", 768)),
+            ssamba_d_state=int(params.get("d_state", 64)),
+            ssamba_expand=int(params.get("expand", 2)),
+            ssamba_num_layers=int(params.get("num_layers", 8)),
         )
     if family == "xlstm":
         return ModelConfig(
             family="xlstm",
             pretrained=False,
             xlstm_dim=int(params.get("dimension", 768)),
+            xlstm_num_blocks=int(params.get("num_blocks", 10)),
             xlstm_state_reset=bool(params.get("state_reset", True)),
             xlstm_output_mode=str(params.get("output_mode", "final")),
         )
@@ -211,6 +227,28 @@ def _build_backbone_model_config(backbone_trial: PhaseThreeTrialRecord) -> Model
             mlp_head_l2_norm=bool(params.get("head_l2_norm", True)),
         )
     raise ValueError(f"Unsupported phase-3 backbone family '{family}'.")
+
+
+def _phase_four_optimizer_config(optim_artifact: Mapping[str, Any]) -> dict[str, Any]:
+    """Extract the phase-2 winning optimizer payload for phase-4 reuse."""
+
+    trial = optim_artifact.get("trial")
+    if not isinstance(trial, Mapping):
+        raise ValueError("Phase-2 best optimization artifact is missing the trial payload.")
+
+    scheduler_name = trial.get("scheduler_name")
+    if not isinstance(scheduler_name, str):
+        raise ValueError("Phase-2 best optimization artifact is missing scheduler_name.")
+
+    weight_decay = trial.get("weight_decay")
+    if not isinstance(weight_decay, int | float):
+        raise ValueError("Phase-2 best optimization artifact is missing weight_decay.")
+
+    return {
+        "scheduler_name": scheduler_name,
+        "weight_decay": float(weight_decay),
+        "trial": dict(trial),
+    }
 
 
 def build_phase_four_command(config_path: Path, run_name: str) -> list[str]:
@@ -283,6 +321,7 @@ class PhaseFourTrialSpec:
         self,
         base_config: ExperimentConfig,
         backbone_trials: Mapping[str, PhaseThreeTrialRecord],
+        optimizer_payload: Mapping[str, Any],
     ) -> ExperimentConfig:
         """Return the concrete config for this trial."""
 
@@ -303,10 +342,20 @@ class PhaseFourTrialSpec:
             test_split="test_extended",
         )
         phase_config = replace(base_config.phase, phase="phase_4")
+        optimizer = replace(
+            base_config.optimizer,
+            weight_decay=float(optimizer_payload["weight_decay"]),
+        )
+        scheduler = _scheduler_config_for_trial(
+            str(optimizer_payload["scheduler_name"]),
+            total_epochs=base_config.training.epochs,
+        )
         return replace(
             base_config,
             dataset=dataset,
             model=_build_backbone_model_config(representative_backbone),
+            optimizer=optimizer,
+            scheduler=scheduler,
             evaluation=evaluation,
             phase=phase_config,
             seed=self.seed,
@@ -499,6 +548,7 @@ class PhaseFourSweepRunner:
         self.selected_test_eval_path = self.phase_dir / "selected_test_eval.json"
         self.base_config = base_config or ExperimentConfig()
         self.phase_three_best_backbones_path = self.output_dir / "phase_3" / "best_backbones.json"
+        self.phase_two_best_optim_path = self.output_dir / "phase_2" / "best_optim.json"
 
     def _load_phase_three_backbones(self) -> dict[str, PhaseThreeTrialRecord]:
         artifact = _read_artifact(
@@ -566,18 +616,20 @@ class PhaseFourSweepRunner:
         self,
         trial: PhaseFourTrialSpec,
         backbone_trials: Mapping[str, PhaseThreeTrialRecord],
+        optimizer_payload: Mapping[str, Any],
     ) -> ExperimentConfig:
-        return trial.to_config(self.base_config, backbone_trials)
+        return trial.to_config(self.base_config, backbone_trials, optimizer_payload)
 
     def _run_trial(
         self,
         trial: PhaseFourTrialSpec,
         backbone_trials: Mapping[str, PhaseThreeTrialRecord],
+        optimizer_payload: Mapping[str, Any],
     ) -> PhaseFourTrialRecord:
         trial_dir, config_path, child_state_path = self._trial_output_paths(trial)
         trial_dir.mkdir(parents=True, exist_ok=True)
 
-        config = self._build_trial_config(trial, backbone_trials)
+        config = self._build_trial_config(trial, backbone_trials, optimizer_payload)
         config_path.write_text(
             json.dumps(config.to_dict(), indent=2, sort_keys=True), encoding="utf-8"
         )
@@ -739,42 +791,214 @@ class PhaseFourSweepRunner:
                     )
         return results
 
-    def _select_winners(
-        self, records: Mapping[str, PhaseFourTrialRecord]
-    ) -> tuple[str | None, dict[str, str]]:
-        accepted_records = [record for record in records.values() if record.accepted]
-        if not accepted_records:
-            return None, {}
+    def _ensemble_results_test(
+        self,
+        test_prediction_artifacts: dict[str, str],
+        records: Mapping[str, PhaseFourTrialRecord],
+        phase_three_trial_ids: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        """Compute within-method ensemble metrics from test prediction artifacts."""
 
-        def _winner_key(record: PhaseFourTrialRecord) -> tuple[float, float, float, float]:
-            return (
-                float(record.macro_f1_nc),
-                -float(record.silence_false_trigger_rate),
-                -float(record.unknown_to_command_leakage),
-                float(record.core_command_macro_f1),
-            )
-
-        best_trial_id = max(accepted_records, key=_winner_key).trial_id
-        method_winner_ids: dict[str, str] = {}
-        for method in PHASE_FOUR_METHODS:
-            method_records = [record for record in accepted_records if record.method == method]
-            if method_records:
-                method_winner_ids[method] = max(method_records, key=_winner_key).trial_id
-        return best_trial_id, method_winner_ids
-
-    def _evaluate_selected_on_test(self, state: PhaseFourSweepState) -> list[dict[str, Any]]:
-        """Evaluate selected phase-4 systems once on the held-out test split."""
-
-        selected_ids: set[str] = set(state.method_winner_ids.values())
-        if state.best_trial_id is not None:
-            selected_ids.add(state.best_trial_id)
-        if not selected_ids:
-            return []
+        grouped: dict[tuple[str, int], list[tuple[str, PhaseFourTrialRecord]]] = {}
+        for trial_id, prediction_path in test_prediction_artifacts.items():
+            record = records.get(trial_id)
+            if record is None or not prediction_path:
+                continue
+            key = (record.method, record.seed)
+            grouped.setdefault(key, []).append((trial_id, record))
 
         results: list[dict[str, Any]] = []
+        for (method, seed), trial_records in grouped.items():
+            by_backbone = {
+                record.baseline_backbone_id: (trial_id, record)
+                for trial_id, record in trial_records
+            }
+            ordered_ids = [
+                trial_id for trial_id in phase_three_trial_ids if trial_id in by_backbone
+            ]
+            for subset_size in range(1, len(ordered_ids) + 1):
+                for subset in combinations(ordered_ids, subset_size):
+                    payloads = []
+                    for trial_id in subset:
+                        if trial_id not in test_prediction_artifacts:
+                            payloads = []
+                            break
+                        prediction_path = test_prediction_artifacts[trial_id]
+                        prediction_file = Path(prediction_path)
+                        if not prediction_file.exists():
+                            payloads = []
+                            break
+                        payloads.append(json.loads(prediction_file.read_text(encoding="utf-8")))
+                    if not payloads:
+                        continue
+                    targets = payloads[0]["targets"]
+                    labels = payloads[0].get("labels", [])
+                    unknown_idx = labels.index("__unknown__") if "__unknown__" in labels else None
+                    silence_idx = labels.index("__silence__") if "__silence__" in labels else None
+                    if unknown_idx is None or silence_idx is None:
+                        continue
+                    probabilities = [
+                        np.array(payload["probs"], dtype=float) for payload in payloads
+                    ]
+                    averaged = sum(probabilities) / float(len(probabilities))
+                    predictions = averaged.argmax(axis=1).tolist()
+                    unknown_tp = sum(
+                        1
+                        for target, pred in zip(targets, predictions, strict=True)
+                        if target == unknown_idx and pred == unknown_idx
+                    )
+                    unknown_fp = sum(
+                        1
+                        for target, pred in zip(targets, predictions, strict=True)
+                        if target != unknown_idx and pred == unknown_idx
+                    )
+                    unknown_fn = sum(
+                        1
+                        for target, pred in zip(targets, predictions, strict=True)
+                        if target == unknown_idx and pred != unknown_idx
+                    )
+                    silence_tp = sum(
+                        1
+                        for target, pred in zip(targets, predictions, strict=True)
+                        if target == silence_idx and pred == silence_idx
+                    )
+                    silence_fp = sum(
+                        1
+                        for target, pred in zip(targets, predictions, strict=True)
+                        if target != silence_idx and pred == silence_idx
+                    )
+                    silence_fn = sum(
+                        1
+                        for target, pred in zip(targets, predictions, strict=True)
+                        if target == silence_idx and pred != silence_idx
+                    )
+                    unknown_precision = (
+                        unknown_tp / (unknown_tp + unknown_fp) if (unknown_tp + unknown_fp) else 0.0
+                    )
+                    unknown_recall = (
+                        unknown_tp / (unknown_tp + unknown_fn) if (unknown_tp + unknown_fn) else 0.0
+                    )
+                    silence_precision = (
+                        silence_tp / (silence_tp + silence_fp) if (silence_tp + silence_fp) else 0.0
+                    )
+                    silence_recall = (
+                        silence_tp / (silence_tp + silence_fn) if (silence_tp + silence_fn) else 0.0
+                    )
+                    unknown_f1 = (
+                        2.0
+                        * unknown_precision
+                        * unknown_recall
+                        / (unknown_precision + unknown_recall)
+                        if (unknown_precision + unknown_recall)
+                        else 0.0
+                    )
+                    silence_f1 = (
+                        2.0
+                        * silence_precision
+                        * silence_recall
+                        / (silence_precision + silence_recall)
+                        if (silence_precision + silence_recall)
+                        else 0.0
+                    )
+                    results.append(
+                        {
+                            "method": method,
+                            "seed": seed,
+                            "subset": list(subset),
+                            "subset_size": len(subset),
+                            "macro_f1_nc": (unknown_f1 + silence_f1) / 2.0,
+                            "unknown_f1": unknown_f1,
+                            "silence_f1": silence_f1,
+                            "eval_split": "test",
+                        }
+                    )
+        return results
+
+    def _select_winners(
+        self,
+        records: Mapping[str, PhaseFourTrialRecord],
+    ) -> tuple[str | None, dict[str, str], float | None]:
+        """Select phase-4 winners by seed-aggregated metrics per method/backbone config."""
+
+        grouped: dict[tuple[str, tuple[str, ...]], list[PhaseFourTrialRecord]] = {}
+        for record in records.values():
+            grouped.setdefault((record.method, record.backbone_ids), []).append(record)
+
+        if not grouped:
+            return None, {}, None
+
+        aggregate_rows: list[dict[str, Any]] = []
+        for (method, backbone_ids), grouped_records in grouped.items():
+            seed_count = len(grouped_records)
+            accepted = all(item.accepted for item in grouped_records)
+            mean_macro_f1_nc = float(
+                sum(item.macro_f1_nc for item in grouped_records) / max(1, seed_count)
+            )
+            mean_silence_false_trigger_rate = float(
+                sum(item.silence_false_trigger_rate for item in grouped_records)
+                / max(1, seed_count)
+            )
+            mean_unknown_to_command_leakage = float(
+                sum(item.unknown_to_command_leakage for item in grouped_records)
+                / max(1, seed_count)
+            )
+            representative = max(grouped_records, key=lambda item: item.macro_f1_nc)
+            aggregate_rows.append(
+                {
+                    "method": method,
+                    "backbone_ids": backbone_ids,
+                    "seed_count": seed_count,
+                    "accepted": accepted,
+                    "mean_macro_f1_nc": mean_macro_f1_nc,
+                    "mean_silence_false_trigger_rate": mean_silence_false_trigger_rate,
+                    "mean_unknown_to_command_leakage": mean_unknown_to_command_leakage,
+                    "representative_trial_id": representative.trial_id,
+                }
+            )
+
+        accepted_rows = [row for row in aggregate_rows if row["accepted"]]
+        if not accepted_rows:
+            return None, {}, None
+
+        def _winner_key(row: Mapping[str, Any]) -> tuple[float, float, float]:
+            return (
+                float(row["mean_macro_f1_nc"]),
+                -float(row["mean_silence_false_trigger_rate"]),
+                -float(row["mean_unknown_to_command_leakage"]),
+            )
+
+        best_row = max(accepted_rows, key=_winner_key)
+        best_trial_id = str(best_row["representative_trial_id"])
+        best_macro_f1_nc = float(best_row["mean_macro_f1_nc"])
+
+        method_winner_ids: dict[str, str] = {}
+        for method in PHASE_FOUR_METHODS:
+            method_rows = [row for row in accepted_rows if row["method"] == method]
+            if method_rows:
+                winner_row = max(method_rows, key=_winner_key)
+                method_winner_ids[method] = str(winner_row["representative_trial_id"])
+        return best_trial_id, method_winner_ids, best_macro_f1_nc
+
+    def _evaluate_completed_on_test(
+        self, state: PhaseFourSweepState
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        """Evaluate all completed phase-4 systems once on the held-out test split.
+
+        Returns:
+            Tuple of (test_results, test_prediction_artifacts) where test_prediction_artifacts
+            maps trial_id to the path of test predictions for ensemble computation.
+        """
+
+        completed_ids = sorted(state.completed_trials.keys())
+        if not completed_ids:
+            return [], {}
+
+        results: list[dict[str, Any]] = []
+        test_prediction_artifacts: dict[str, str] = {}
+
         for trial_id in tqdm(
-            sorted(selected_ids),
-            total=len(selected_ids),
+            completed_ids,
+            total=len(completed_ids),
             desc="phase-4 heldout eval",
             leave=False,
         ):
@@ -786,7 +1010,7 @@ class PhaseFourSweepRunner:
             if not config_path.exists():
                 continue
 
-            run_name = f"{record.trial_id}_heldout_test"
+            run_name = record.trial_id
             command = build_phase_four_test_command(config_path, run_name)
             completed_process = subprocess.run(  # noqa: S603
                 command,
@@ -799,23 +1023,29 @@ class PhaseFourSweepRunner:
             child_state_path = self.output_dir / "phase_4" / "runs" / run_name / "state.json"
             summary = _summary_from_completed_process(child_state_path, completed_process)
             metrics = _phase_four_score_recursive(summary)
-            results.append(
-                {
-                    "trial_id": record.trial_id,
-                    "method": record.method,
-                    "seed": record.seed,
-                    "baseline_backbone_id": record.baseline_backbone_id,
-                    "core_command_macro_f1": metrics["core_command_macro_f1"],
-                    "unknown_f1": metrics["unknown_f1"],
-                    "silence_f1": metrics["silence_f1"],
-                    "macro_f1_nc": metrics["macro_f1_nc"],
-                    "inference_latency_ms_mean": metrics["inference_latency_ms_mean"],
-                    "unknown_to_command_leakage": metrics["unknown_to_command_leakage"],
-                    "silence_false_trigger_rate": metrics["silence_false_trigger_rate"],
-                    "heldout_run_name": run_name,
-                    "heldout_state_path": str(child_state_path),
-                }
-            )
+
+            # Extract test prediction artifact path from the test eval output
+            test_prediction_artifact = _phase_four_prediction_artifact_recursive(summary)
+            if test_prediction_artifact:
+                test_prediction_artifacts[trial_id] = test_prediction_artifact
+
+            result_dict = {
+                "trial_id": record.trial_id,
+                "method": record.method,
+                "seed": record.seed,
+                "baseline_backbone_id": record.baseline_backbone_id,
+                "core_command_macro_f1": metrics["core_command_macro_f1"],
+                "unknown_f1": metrics["unknown_f1"],
+                "silence_f1": metrics["silence_f1"],
+                "macro_f1_nc": metrics["macro_f1_nc"],
+                "inference_latency_ms_mean": metrics["inference_latency_ms_mean"],
+                "unknown_to_command_leakage": metrics["unknown_to_command_leakage"],
+                "silence_false_trigger_rate": metrics["silence_false_trigger_rate"],
+                "per_class": metrics.get("per_class", {}),
+                "heldout_run_name": run_name,
+                "heldout_state_path": str(child_state_path),
+            }
+            results.append(result_dict)
 
         _atomic_write_json(
             self.selected_test_eval_path,
@@ -824,28 +1054,27 @@ class PhaseFourSweepRunner:
                 "results": results,
             },
         )
-        return results
+        return results, test_prediction_artifacts
 
     def execute(self) -> dict[str, Any]:
         """Run the full phase-4 sweep, skipping completed trials."""
 
         backbone_trials = self._load_phase_three_backbones()
+        optim_artifact = _read_artifact(
+            self.phase_two_best_optim_path,
+            "Phase-2 best optimization artifact",
+        )
+        optimizer_payload = _phase_four_optimizer_config(optim_artifact)
         seeds = _sweep_seeds(self.base_config.seeds)
         trials = _apply_trial_cap(build_phase_four_trials(tuple(backbone_trials), seeds))
         total_trials = len(trials)
         logger = logging.getLogger(__name__)
         state = self.load_state()
-        best_trial_id = state.best_trial_id
-        best_score = state.best_macro_f1_nc if state.best_macro_f1_nc is not None else -1.0
 
         for trial_index, trial in enumerate(
             tqdm(trials, total=total_trials, desc="phase-4 trials", leave=False), start=1
         ):
             if trial.trial_id in state.completed_trials:
-                existing = state.completed_trials[trial.trial_id]
-                if existing.accepted and existing.macro_f1_nc >= best_score:
-                    best_trial_id = trial.trial_id
-                    best_score = existing.macro_f1_nc
                 logger.info(
                     "[phase-4] [%d/%d] skipping completed %s",
                     trial_index,
@@ -861,7 +1090,7 @@ class PhaseFourSweepRunner:
                 trial.trial_id,
             )
 
-            trial_record = self._run_trial(trial, backbone_trials)
+            trial_record = self._run_trial(trial, backbone_trials, optimizer_payload)
             logger.info(
                 "[phase-4] finished %s macro_f1_nc=%.6f accepted=%s",
                 trial.trial_id,
@@ -869,9 +1098,7 @@ class PhaseFourSweepRunner:
                 trial_record.accepted,
             )
             completed_trials = {**state.completed_trials, trial.trial_id: trial_record}
-            best_trial_id, method_winner_ids = self._select_winners(completed_trials)
-            if trial_record.accepted and trial_record.macro_f1_nc >= best_score:
-                best_score = trial_record.macro_f1_nc
+            best_trial_id, method_winner_ids, best_score = self._select_winners(completed_trials)
             state = PhaseFourSweepState(
                 schema_version=state.schema_version,
                 output_dir=state.output_dir,
@@ -879,7 +1106,7 @@ class PhaseFourSweepRunner:
                 phase_three_trial_ids=state.phase_three_trial_ids,
                 completed_trials=completed_trials,
                 best_trial_id=best_trial_id,
-                best_macro_f1_nc=best_score if best_score >= 0.0 else None,
+                best_macro_f1_nc=best_score,
                 method_winner_ids=method_winner_ids,
                 created_at=state.created_at,
                 updated_at=trial_record.completed_at,
@@ -887,9 +1114,9 @@ class PhaseFourSweepRunner:
             self._save_state(state)
 
         if state.completed_trials:
-            best_trial_id, method_winner_ids = self._select_winners(state.completed_trials)
-            if best_trial_id is not None:
-                best_score = state.completed_trials[best_trial_id].macro_f1_nc
+            best_trial_id, method_winner_ids, best_score = self._select_winners(
+                state.completed_trials
+            )
             state = PhaseFourSweepState(
                 schema_version=state.schema_version,
                 output_dir=state.output_dir,
@@ -897,14 +1124,20 @@ class PhaseFourSweepRunner:
                 phase_three_trial_ids=state.phase_three_trial_ids,
                 completed_trials=state.completed_trials,
                 best_trial_id=best_trial_id,
-                best_macro_f1_nc=best_score if best_score >= 0.0 else None,
+                best_macro_f1_nc=best_score,
                 method_winner_ids=method_winner_ids,
                 created_at=state.created_at,
                 updated_at=_utc_now(),
             )
             self._save_state(state)
 
-        selected_test_results = self._evaluate_selected_on_test(state)
+        selected_test_results, test_prediction_artifacts = self._evaluate_completed_on_test(state)
+
+        ensemble_test_results = self._ensemble_results_test(
+            test_prediction_artifacts,
+            state.completed_trials,
+            state.phase_three_trial_ids,
+        )
 
         return {
             "phase": "phase-4",
@@ -925,6 +1158,7 @@ class PhaseFourSweepRunner:
                 state.completed_trials,
                 state.phase_three_trial_ids,
             ),
+            "ensemble_test_results": ensemble_test_results,
             "selected_test_results": selected_test_results,
             "state_path": str(self.state_path),
             "best_eval_path": str(self.best_eval_path),

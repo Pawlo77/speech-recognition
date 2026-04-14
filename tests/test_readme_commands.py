@@ -50,14 +50,17 @@ def test_readme_shell_code_blocks_use_valid_commands() -> None:
     text = _readme_text()
 
     expected_commands = [
-        "uv sync",
+        "make install",
         "make test",
         "make pre-commit-all",
         "make phase-1",
         "make phase-2",
         "make phase-3",
         "make phase-4",
+        "make status",
         "make full-pipeline",
+        "make eta-estimate",
+        "make estimate-ram",
         "mlflow ui --backend-store-uri mlruns",
         "speech-recognition mlflow-ui",
     ]

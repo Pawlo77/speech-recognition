@@ -59,21 +59,21 @@ Table~\ref{tab:dataset_splits_12class} reports exact split sizes after applying 
 \textbf{Split} & \textbf{Total $N$} & \textbf{Active classes} & \textbf{Command samples} & \textbf{Unknown samples} & \textbf{Silence samples} & \textbf{Used for} \\ \midrule
 \texttt{train\_small} & $10{,}000$ & $10$ & $10{,}000$ & $0$ & $0$ & Phases $1$--$3$ train \\
 \texttt{valid\_small} & $2{,}500$ & $10$ & $2{,}500$ & $0$ & $0$ & Phases $1$--$3$ validation \\
-\texttt{test\_small} & $2{,}500$ & $10$ & $2{,}500$ & $0$ & $0$ & Reserved diagnostics split \\
-\texttt{train\_extended} & $38{,}249$ & $12$ & $18{,}965$ & $18{,}965$ & $319$ & Phase $4$ train \\
-\texttt{valid\_extended} & $4{,}733$ & $12$ & $2{,}347$ & $2{,}347$ & $39$ & Phase $4$ validation \\
-\texttt{test\_extended} & $4{,}780$ & $12$ & $2{,}370$ & $2{,}370$ & $40$ & Phase $4$ test \\ \bottomrule
+\texttt{test\_small} & $2{,}500$ & $10$ & $2{,}500$ & $0$ & $0$ & Phases $1$--$3$ diagnostics \\
+\texttt{train\_extended} & $38{,}210$ & $12$ & $18{,}946$ & $18{,}946$ & $318$ & Phase $4$ train \\
+\texttt{valid\_extended} & $4{,}776$ & $12$ & $2{,}368$ & $2{,}368$ & $40$ & Phase $4$ validation \\
+\texttt{test\_extended} & $4{,}776$ & $12$ & $2{,}368$ & $2{,}368$ & $40$ & Phase $4$ test \\ \bottomrule
 \end{tabular}
 \end{table*}
 
 \subsection{Unknown-Class Synthesis Methodology}
-Before merging labels, we persist a metadata artifact \texttt{train/split\_lists/unknown\_origin\_labels.csv} that maps each merged unknown file to its original source label, ensuring no provenance is lost. For the extended dataset configuration, we generate additional \texttt{\_\_unknown\_\_} examples directly from the training corpus without external models. Candidate source clips are drawn from spoken command folders only (excluding \texttt{\_\_unknown\_\_} and background-noise folders), with the hard constraint that clips within one synthetic sample must come from different classes.
+Before merging labels, we persist a metadata artifact \texttt{train/split\_lists/unknown\_origin\_labels.csv} that maps each merged unknown file to its original source label, ensuring no provenance is lost. For the extended dataset configuration, the unknown pool is built from (i) original labels outside the $10$ target commands and outside silence/background-noise, and (ii) synthetic \texttt{\_\_unknown\_\_} mixtures generated from those same non-target source labels. Candidate source clips are constrained to come from different classes within one synthetic sample.
 
 Each synthetic sample is formed by blending $2$ or $3$ one-second clips. Before mixing, each source is mean-centered, RMS-normalized toward a shared target level, and lightly smoothed with a short delayed component to reduce abrupt local transients. The final mixture is then produced by dense short-frame overlap where all sources remain active throughout the full second with slowly varying weights, encouraging spectro-temporal continuity rather than hard segment boundaries.
 
-To avoid regenerating the same example, uniqueness is tracked at the source-file level (sorted source-path tuple), not at the class-combination level. After synthesis, each candidate is passed through an envelope-based smoothness gate (windowed RMS trajectory checks for abrupt jumps and deep internal valleys). Candidates that fail this gate are discarded and regenerated in a retry loop; only accepted candidates are written to the \texttt{\_\_unknown\_\_} directory. In Phase $4$, the runtime checks whether empirical unknown support falls below the mean per-command support and only then enables additional synthetic unknown generation. For the fixed extended splits in Table~\ref{tab:dataset_splits_12class}, this condition is not met. Exact distribution for the extended training set is shown in Figure~\ref{fig:extended_split_class_histogram}.
+To avoid regenerating the same example, uniqueness is tracked at the source-file level (sorted source-path tuple), not at the class-combination level. After synthesis, each candidate is passed through an envelope-based smoothness gate (windowed RMS trajectory checks for abrupt jumps and deep internal valleys). Candidates that fail this gate are discarded and regenerated in a retry loop; only accepted candidates are written to the \texttt{\_\_unknown\_\_} directory. During extended-split construction, original unknown candidates are first deduplicated by audio-content hash; if this deduplicated pool is smaller than the required unknown quota, synthetic mixtures are added as a top-up until the target unknown count is reached (or generation attempts are exhausted).
 
-\begin{figure}
+\begin{figure}[htbp]
     \centering
     \includegraphics[width=\linewidth]{../notebooks/plots/extended_split_class_histogram.png}
     \caption{Class distribution in the extended training set.}
@@ -83,7 +83,7 @@ To avoid regenerating the same example, uniqueness is tracked at the source-file
 \subsection{Audio analysis}
 In analyzing the raw audio data the focus is on understanding the raw waveforms and their spectral properties. Figure~\ref{fig:raw_wave_and_spectrogram} shows an example of a raw audio waveform and its corresponding spectrogram, illustrating the temporal and frequency characteristics of a typical command sample. The spectrogram reveals the energy distribution across frequencies over time, which is crucial for feature extraction strategies. Raw waveforms exhibit high variability in amplitude and temporal structure, while spectrograms provide a more stable representation that captures the essential characteristics of the audio signal. Observing raw waveforms of different classes (Appendix \ref{app:extra analysis}) reveals that amplitude patterns varies, however the main signal begins approximately after $0.4$ seconds.
 
-\begin{figure}
+\begin{figure}[htbp]
     \centering
     \includegraphics[width=\linewidth]{../notebooks/plots/spectrogram_example_yes.png}
     \caption{Raw wave and spectrogram example from train set for "yes".}
@@ -93,12 +93,12 @@ In analyzing the raw audio data the focus is on understanding the raw waveforms 
 Another factor to consider is the average spectral content across different command classes. Figure~\ref{fig:mean_fft_per_label_train} shows the mean FFT magnitude for each label in the training set, highlighting differences in frequency content between commands. Observation can be made that different commands have their own characteristic which can be exploited by the models to distinguish between them.
 
 
-\begin{figure}
+\begin{figure*}[htbp]
     \centering
-    \includegraphics[width=\linewidth]{../notebooks/plots/mean_fft_per_label_train.png}
+    \includegraphics[width=0.7\textwidth]{../notebooks/plots/mean_fft_per_label_train.png}
     \caption{Mean FFT magnitude per label in the training set.}
     \label{fig:mean_fft_per_label_train}
-\end{figure}
+\end{figure*}
 
 \section{Experimental Design and MLOps Pipeline}
 \label{sec:phases}
@@ -122,7 +122,7 @@ Split usage is fixed by the dataset protocol in Section~\ref{sec:dataset}: Phase
 \end{table}
 
 \subsection{Uniform Training Protocol}
-To ensure fair architectural comparison, all models are trained under an identical, deterministic protocol with shared hyperparameters and optimization controls. Model training follows the Adam optimizer (\cite{kingma2014adam}) with default parameters ($\beta_1 = 0.9, \beta_2 = 0.999, \epsilon = 10^{-8}$) and a learning rate of $3 \times 10^{-4}$. Gradient clipping is applied with a maximum norm threshold of $1.0$ to stabilize training on recurrent and attention-based architectures.
+To ensure fair architectural comparison, all models are trained under an identical, deterministic protocol with shared hyperparameters and optimization controls. Model training follows AdamW (\cite{loshchilov2019adamw}) with fixed base settings ($\beta_1 = 0.9, \beta_2 = 0.999, \epsilon = 10^{-8}$) and a base learning rate of $3 \times 10^{-4}$. Phase $2$ searches the AdamW regularization and scheduler settings, and the winning optimizer configuration is then carried forward into Phases $3$ and $4$. Gradient clipping is applied with a maximum norm threshold of $1.0$ to stabilize training on recurrent and attention-based architectures.
 
 The training regimen uses a batch size of $32$ across all experiments and model families, with $60$ training epochs and a learning-rate scheduler employing cosine annealing with linear warmup (\texttt{cosine\_annealing\_warmup}). A warmup of $5$ epochs linearly increases the learning rate from zero, followed by cosine decay to a minimum rate of $10^{-6}$. Early stopping is enforced with a patience of $10$ epochs without macro-F1 improvement on the validation set. Deterministic execution is enabled via fixed seed initialization, and validation is performed every epoch to track model convergence.
 
@@ -166,15 +166,15 @@ Mel + SpecAugment & $1024$ & $160$ & $64$ ms & $10$ ms & $101$ & $128$ mels & $1
 \subsection{Phases 2 \& 3: Architectural Bias and Optimization (Q2)}
 To isolate structural effects, we train all models entirely from random initialization. Rather than asking which pre-training source transfers best, this design evaluates which architecture learns most effectively from the supervision signal itself.
 
-Phase $2$ locks the global optimization strategy (Table~\ref{tab:global_hyperparams}) using the optimal Phase $1$ feature set. Phase $3$ then sweeps model-specific hyperparameters (Table~\ref{tab:model_hyperparams}) across $5$ distinct families:
+Phase $2$ tunes the global AdamW configuration (Table~\ref{tab:global_hyperparams}) on the best Phase $1$ feature set. Phase $3$ then sweeps model-specific hyperparameters (Table~\ref{tab:model_hyperparams}) using the winning Phase $2$ optimizer settings across $5$ distinct families:
 
 % TODO: Add visual comparison of the structural paradigms: Local spatial (ConvNeXt) vs. Global attention (AST) vs. Sequential state tracking (SSAMBA/xLSTM).
 
 \begin{description}
-    \item[AST (Audio Spectrogram Transformer):] Implemented with Hugging Face \texttt{ASTForAudioClassification} (from \texttt{transformers}) using \texttt{ASTConfig} with hidden size $512$, $10$ encoder layers, $8$ attention heads, and intermediate size $2048$ (default non-pretrained setup in this work). \textit{Key feature / why chosen:} global self-attention from the first layer gives immediate all-to-all context, making AST the explicit ``global dependency'' reference model \cite{vaswani2017attention, gong2021ast}.
+    \item[AST (Audio Spectrogram Transformer):] Implemented with Hugging Face \texttt{ASTForAudioClassification} (from \texttt{transformers}) using \texttt{ASTConfig} with hidden size $512$, $8$ encoder layers, $8$ attention heads, and intermediate size $2048$ (targeted \textasciitilde{}25M-scale setup in this work). \textit{Key feature / why chosen:} global self-attention from the first layer gives immediate all-to-all context, making AST the explicit ``global dependency'' reference model \cite{vaswani2017attention, gong2021ast}.
     \item[ConvNeXt (Modern CNN):] Implemented as \texttt{torchvision.models.convnext\_tiny} (primary backend), with the first stem convolution adapted to one-channel spectrogram input; \texttt{timm convnext\_tiny} is kept as backend fallback. \textit{Key feature / why chosen:} strong locality and translation-equivariant inductive bias provide the canonical modern CNN baseline against which global and recurrent models are compared \cite{lecun1995convolutional, liu2022convnet}.
-    \item[SSAMBA (Selective State Space):] Implemented through \texttt{mamba\_ssm.Mamba} blocks in a repository wrapper (\texttt{MambaHead}), stacked with default configuration $d_{\text{model}}=768$, $d_{\text{state}}=64$, $d_{\text{conv}}=4$, expand $=2$, and $8$ layers. \textit{Key feature / why chosen:} input-selective state-space updates target long-range sequence modeling with linear-time scaling, representing an efficient alternative to full attention \cite{gu2023mamba,shams2024ssamba}.
-    \item[xLSTM (High-Capacity Recurrence):] Implemented with \texttt{xlstm.xLSTMBlockStack} in a repository wrapper (\texttt{XLSTMHead}), using embedding dimension $768$ and $10$ blocks by default (alternating mLSTM/sLSTM placements). \textit{Key feature / why chosen:} matrix-memory recurrence $C_t \in \mathbb{R}^{d \times d}$ increases recurrent capacity beyond standard LSTM cells, serving as the high-capacity recurrent comparator \cite{beck2024xlstm}.
+    \item[SSAMBA (Selective State Space):] Implemented through \texttt{mamba\_ssm.Mamba} blocks in a repository wrapper (\texttt{MambaHead}), stacked with configuration $d_{\text{model}}=768$, $d_{\text{state}}=64$, $d_{\text{conv}}=4$, expand $=2$, and $6$ layers (targeted \textasciitilde{}25M-scale setup in this work). \textit{Key feature / why chosen:} input-selective state-space updates target long-range sequence modeling with linear-time scaling, representing an efficient alternative to full attention \cite{gu2023mamba,shams2024ssamba}.
+    \item[xLSTM (High-Capacity Recurrence):] Implemented with \texttt{xlstm.xLSTMBlockStack} in a repository wrapper (\texttt{XLSTMHead}), using embedding dimension $704$/$768$ and $8$ blocks (alternating mLSTM/sLSTM placements; targeted \textasciitilde{}25M-scale setup). \textit{Key feature / why chosen:} matrix-memory recurrence $C_t \in \mathbb{R}^{d \times d}$ increases recurrent capacity beyond standard LSTM cells, serving as the high-capacity recurrent comparator \cite{beck2024xlstm}.
     \item[MLP-Mixer:] Implemented as \texttt{timm gmixer\_24\_224} (official gMLP/Mixer-family model) for the MLP-only baseline. \textit{Key feature / why chosen:} token/channel mixing via dense projections with no explicit convolutional or recurrent prior acts as an architectural ``minimal prior'' control \cite{tolstikhin2021mlpmixer}.
 \end{description}
 
@@ -183,30 +183,35 @@ Phase $2$ locks the global optimization strategy (Table~\ref{tab:global_hyperpar
 \caption{Global optimization hyperparameters (Phase $2$).}
 \label{tab:global_hyperparams}
 \small
-\begin{tabularx}{\columnwidth}{@{}l @{}>{\centering\arraybackslash}p{2.8cm} X@{}}
+\begin{tabularx}{\columnwidth}{@{}p{2cm} @{}>{\centering\arraybackslash}p{2.8cm} X@{}}
 \toprule
 \textbf{Parameter} & \textbf{Values} & \textbf{Purpose} \\ \midrule
-Weight decay & $10^{-2}, 10^{-1}$ & Prevents overwriting of learned features \\
-LR scheduler & Cosine Annealing with Warmup / Reduce LR on Plateau & Cosine annealing with linear warmup; or metric-driven reduction \\
+AdamW learning rate & $3 \times 10^{-4}$ & Fixed base step size reused by later phases \\
+AdamW $\beta_1, \beta_2$ & $(0.9, 0.999)$ & Fixed first- and second-moment coefficients \\
+AdamW $\epsilon$ & $10^{-8}$ & Fixed numerical stability constant \\
+Weight decay & $10^{-2}, 10^{-1}$ & Swept AdamW regularization strength \\
+LR scheduler & Cosine Annealing with Warmup / Reduce LR on Plateau & Swept scheduler family; selected schedule is reused later \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
 \begin{table*}[htbp]
 \centering
-\caption{Model-specific hyperparameter sweeps (Phase $3$), including architecture type and parameter count from official backend implementations (default non-pretrained configuration, $12$ output classes).}
+\caption{Model-specific hyperparameter sweeps (Phase $3$), including architecture type and parameter count from the repo-specific adapters used in this work (default non-pretrained configuration, $12$ output classes).}
 \label{tab:model_hyperparams}
 \small
 \begin{tabular}{@{}p{1.8cm} p{4.1cm} p{1.8cm} p{8.0cm}@{}}
 \toprule
 \textbf{Model} & \textbf{Arch. type} & \textbf{Total params} & \textbf{Sweep Space} \\ \midrule
-\textbf{AST} & Transformer (global attention) & $31{,}720{,}972$ & Dropout $\{0.1, 0.5\}$; Head \{linear, MLP(256)\}; Pos. Emb. \{interp., learned\}; default size: hidden $=512$, layers $=10$, heads $=8$ \cite{gong2021ast} \\
+\textbf{AST} & Transformer (global attention) & $25{,}416{,}204$ & Dropout $\{0.1, 0.5\}$; Head \{linear, MLP(256)\}; Pos. Emb. \{interp., learned\}; fixed size: hidden $=512$, layers $=8$, heads $=8$, intermediate $=2048$ \cite{gong2021ast} \\
 \textbf{ConvNeXt} & CNN (local spatial hierarchy) & $27{,}826{,}284$ & Stoch. Depth $\{0.0, 0.2\}$; Kernel size $\{7\times7\}$ \cite{liu2022convnet} \\
-\textbf{SSAMBA} & State-space sequence model & $31{,}947{,}276$ & Pooling \{mean, max\}; CLS \{yes, no\}; Stride $\{10\text{ms}, 5\text{ms}\}$; $d_{\text{model}}=768$, $d_{\text{state}}=64$, layers $=8$ \cite{gu2023mamba,shams2024ssamba} \\
-\textbf{xLSTM} & Recurrent sequence model & $35{,}781{,}172$ & Dim $d \in \{768, 896\}$; State Reset \{T, F\}; Output \{final, mean\}; default stack uses $d=768$, blocks $=10$ \cite{beck2024xlstm} \\
+\textbf{SSAMBA} & State-space sequence model & $23{,}963{,}148$ & Pooling \{mean, max\}; CLS \{yes, no\}; Stride $\{10\text{ms}, 5\text{ms}\}$; fixed size: $d_{\text{model}}=768$, $d_{\text{state}}=64$, expand $=2$, layers $=6$ \cite{gu2023mamba,shams2024ssamba} \\
+\textbf{xLSTM} & Recurrent sequence model & $24{,}259{,}180$ & Dim $d \in \{704, 768\}$; State Reset \{T, F\}; Output \{final, mean\}; fixed depth: blocks $=8$ \cite{beck2024xlstm} \\
 \textbf{MLP-Mixer} & MLP-only token/channel mixer & $24{,}144{,}108$ & Dropout $\{0.0, 0.2\}$; Head L2 Norm \{yes, no\}; default timm variant: \texttt{gmixer\_24\_224} \cite{tolstikhin2021mlpmixer} \\ \bottomrule
 \end{tabular}
 \end{table*}
+
+The counts in Table~\ref{tab:model_hyperparams} are measured on the repository's adapterized backbones, not on the upstream libraries' unmodified reference models. This keeps the comparison honest about the actual code we run while still keeping the backbones in a comparable parameter band; the point is adapter-level parity, not matching an external giant-model budget.
 
 \subsection{Phase 4: Non-Command Class Methodology (Q3)}
 All core models are optimized natively via standard \texttt{CrossEntropyLoss} \cite{goodfellow2016deep}. We intentionally defer imbalance-specific loss shaping and resampling in earlier phases to keep architectural comparisons interpretable. Phases $1$--$3$ use command-only data splits while preserving a shared implementation template for model heads. Phase $4$ keeps the selected backbone family and hyperparameters fixed and retrains on \texttt{train\_extended} for explicit non-command handling. In this sense, ``freezing the top $3$ architectures'' refers to freezing architecture and optimization choices selected upstream. In Phase $4$, we test $5$ alternatives for handling \texttt{\_\_unknown\_\_} and \texttt{\_\_silence\_\_}:
@@ -257,27 +262,30 @@ While this study establishes a strictly controlled baseline for evaluating KWS a
 \bibliography{mybib}
 
 \appendix
-\section{Additional Analyses and Visualizations}\label{app:extra_analysis}
+\section{Additional Analyses and Visualizations}
+\label{app:extra_analysis}
 
-\begin{figure}
+Figures~\ref{fig:raw_wave_and_spectrogram_1}, \ref{fig:raw_wave_and_spectrogram_2}, and \ref{fig:raw_wave_and_spectrogram_3} provide additional waveform--spectrogram examples for the labels \textit{down}, \textit{no}, and \textit{up}, respectively. These supplementary plots complement the main text by illustrating cross-class variability in temporal envelope shape, onset location, and spectral energy concentration. Together, they support the motivation for using time-frequency features and for comparing architectures with different inductive biases for local versus global temporal-spectral structure.
+
+\begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.9\linewidth]{../notebooks/plots/spectrogram_example_down.png}
+    \includegraphics[width=\linewidth]{../notebooks/plots/spectrogram_example_down.png}
     \caption{Raw wave and spectrogram example from train set for "down".}
-    \label{fig:raw_wave_and_spectrogram}
+    \label{fig:raw_wave_and_spectrogram_1}
 \end{figure}
 
-\begin{figure}
+\begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.9\linewidth]{../notebooks/plots/spectrogram_example_no.png}
+    \includegraphics[width=\linewidth]{../notebooks/plots/spectrogram_example_no.png}
     \caption{Raw wave and spectrogram example from train set for "no".}
-    \label{fig:raw_wave_and_spectrogram}
+    \label{fig:raw_wave_and_spectrogram_2}
 \end{figure}
 
-\begin{figure}
+\begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.9\linewidth]{../notebooks/plots/spectrogram_example_up.png}
+    \includegraphics[width=\linewidth]{../notebooks/plots/spectrogram_example_up.png}
     \caption{Raw wave and spectrogram example from train set for "up".}
-    \label{fig:raw_wave_and_spectrogram}
+    \label{fig:raw_wave_and_spectrogram_3}
 \end{figure}
 
 \end{document}
