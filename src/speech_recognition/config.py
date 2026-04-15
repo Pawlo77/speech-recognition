@@ -11,14 +11,12 @@ class ConfigValidationError(ValueError):
 
 DEFAULT_SEEDS: tuple[int, int, int] = (0, 42, 2003)
 """Default random seeds for reproducibility across all experiment phases."""
-
 ALLOWED_TRAIN_SPLITS: set[str] = {"train_small", "train_extended"}
 """Allowed dataset splits for training."""
 ALLOWED_VALID_SPLITS: set[str] = {"valid_small", "valid_extended"}
 """Allowed dataset splits for validation."""
 ALLOWED_TEST_SPLITS: set[str] = {"test_small", "test_extended"}
 """Allowed dataset splits for testing."""
-
 ALLOWED_FEATURE_PIPELINES: set[str] = {
     "mel_spectrogram",
     "high_temporal_mel",
@@ -27,7 +25,6 @@ ALLOWED_FEATURE_PIPELINES: set[str] = {
     "mel_specaugment",
 }
 """Allowed feature pipeline identifiers used by the experiment stack."""
-
 
 ALLOWED_MODEL_FAMILIES: set[str] = {"ast", "convnext", "ssamba", "xlstm", "mlp_mixer"}
 """Allowed model family identifiers used by the experiment stack."""
@@ -47,28 +44,24 @@ ALLOWED_EVALUATION_STRATEGIES: set[str] = {
 
 def _require(condition: bool, message: str) -> None:
     """Raise a validation error when a condition is false."""
-
     if not condition:
         raise ConfigValidationError(message)
 
 
 def _require_str(name: str, value: str) -> None:
     """Validate that a value is a non-empty string."""
-
     _require(isinstance(value, str), f"{name} must be a string.")
     _require(bool(value.strip()), f"{name} must not be empty.")
 
 
 def _require_int(name: str, value: int, minimum: int = 1) -> None:
     """Validate that a value is an integer and meets a minimum bound."""
-
     _require(isinstance(value, int), f"{name} must be an integer.")
     _require(value >= minimum, f"{name} must be greater than or equal to {minimum}.")
 
 
 def _require_float(name: str, value: float, minimum: float | None = None) -> None:
     """Validate that a value is numeric and optionally above a minimum."""
-
     _require(isinstance(value, int | float), f"{name} must be a number.")
     if minimum is not None:
         _require(float(value) >= minimum, f"{name} must be greater than or equal to {minimum}.")
@@ -76,14 +69,12 @@ def _require_float(name: str, value: float, minimum: float | None = None) -> Non
 
 def _require_fraction(name: str, value: float) -> None:
     """Validate that a value lies in the closed interval [0, 1]."""
-
     _require_float(name, value)
     _require(0.0 <= float(value) <= 1.0, f"{name} must be between 0 and 1.")
 
 
 def _serialize(value: Any) -> Any:
     """Convert nested dataclasses and tuples into JSON-friendly values."""
-
     if is_dataclass(value):
         return {field.name: _serialize(getattr(value, field.name)) for field in fields(value)}
     if isinstance(value, tuple):
@@ -97,7 +88,6 @@ def _serialize(value: Any) -> Any:
 
 def _extract_mapping(data: Mapping[str, Any] | Any, name: str) -> Mapping[str, Any]:
     """Validate and return a mapping for deserialization."""
-
     _require(isinstance(data, Mapping), f"{name} must be a mapping.")
     return data
 
@@ -134,13 +124,11 @@ class DatasetConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the dataset config."""
-
         return _serialize(self)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
         """Build a dataset config from a mapping."""
-
         mapping = _extract_mapping(data, name="DatasetConfig")
         return cls(**dict(mapping))
 
@@ -202,13 +190,11 @@ class FeaturePipelineConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the feature config."""
-
         return _serialize(self)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
         """Build a feature pipeline config from a mapping."""
-
         mapping = _extract_mapping(data, name="FeaturePipelineConfig")
         return cls(**dict(mapping))
 
@@ -331,13 +317,11 @@ class ModelConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the model config."""
-
         return _serialize(self)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
         """Build a model config from a mapping."""
-
         mapping = _extract_mapping(data, name="ModelConfig")
         return cls(**dict(mapping))
 
@@ -375,13 +359,11 @@ class OptimizerConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the optimizer config."""
-
         return _serialize(self)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
         """Build an optimizer config from a mapping."""
-
         mapping = _extract_mapping(data, name="OptimizerConfig")
         kwargs = dict(mapping)
         if "betas" in kwargs:
@@ -397,7 +379,7 @@ class SchedulerConfig:
     """Scheduler name."""
     warmup_epochs: int = 5
     """Number of warmup epochs."""
-    total_epochs: int = 60
+    total_epochs: int = 200
     """Total number of training epochs."""
     min_learning_rate: float = 1e-6
     """Lower bound for the learning rate."""
@@ -424,13 +406,11 @@ class SchedulerConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the scheduler config."""
-
         return _serialize(self)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
         """Build a scheduler config from a mapping."""
-
         mapping = _extract_mapping(data, name="SchedulerConfig")
         return cls(**dict(mapping))
 
@@ -439,7 +419,7 @@ class SchedulerConfig:
 class TrainingControlConfig:
     """Training loop controls that are independent from the optimizer."""
 
-    epochs: int = 60
+    epochs: int = 200
     """Number of training epochs."""
     batch_size: int = 32
     """Mini-batch size."""
@@ -447,7 +427,7 @@ class TrainingControlConfig:
     """Number of steps to accumulate gradients."""
     num_workers: int = 4
     """DataLoader worker count."""
-    log_every_n_steps: int = 25
+    log_every_n_steps: int = 100
     """Logging interval in steps."""
     validate_every_n_epochs: int = 1
     """Validation interval in epochs."""
@@ -474,13 +454,11 @@ class TrainingControlConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the training config."""
-
         return _serialize(self)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
         """Build a training control config from a mapping."""
-
         mapping = _extract_mapping(data, name="TrainingControlConfig")
         return cls(**dict(mapping))
 
@@ -514,13 +492,11 @@ class CheckpointConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the checkpoint config."""
-
         return _serialize(self)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
         """Build a checkpoint config from a mapping."""
-
         mapping = _extract_mapping(data, name="CheckpointConfig")
         return cls(**dict(mapping))
 
@@ -543,6 +519,8 @@ class MLflowTrackingConfig:
     """Log metrics to MLflow."""
     log_artifacts: bool = True
     """Log artifacts to MLflow."""
+    retain_local_checkpoints: bool = False
+    """Keep local checkpoint files after they are uploaded to MLflow artifacts."""
 
     def __post_init__(self) -> None:
         if self.enabled:
@@ -553,17 +531,12 @@ class MLflowTrackingConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the MLflow config."""
-
         return _serialize(self)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
         """Build an MLflow tracking config from a mapping."""
-
         mapping = _extract_mapping(data, name="MLflowTrackingConfig")
-        # Backward compatibility: older runs persisted the previous default
-        # file-store value "mlruns". Migrate that legacy default to SQLite so
-        # modern MLflow UI endpoints (trace metrics) work without manual edits.
         if mapping.get("tracking_uri") == "mlruns":
             mapping = {**mapping, "tracking_uri": "sqlite:///mlruns.db"}
         return cls(**dict(mapping))
@@ -628,13 +601,11 @@ class EvaluationConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the evaluation config."""
-
         return _serialize(self)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
         """Build an evaluation config from a mapping."""
-
         mapping = _extract_mapping(data, name="EvaluationConfig")
         kwargs = dict(mapping)
         if "backbone_ids" in kwargs:
@@ -668,13 +639,11 @@ class PhaseSelectionConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the phase config."""
-
         return _serialize(self)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
         """Build a phase selection config from a mapping."""
-
         mapping = _extract_mapping(data, name="PhaseSelectionConfig")
         kwargs = dict(mapping)
         if "available_phases" in kwargs:
@@ -721,13 +690,11 @@ class ExperimentConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the full experiment config."""
-
         return _serialize(self)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
         """Build a full experiment config from a mapping."""
-
         mapping = _extract_mapping(data, name="ExperimentConfig")
         kwargs = dict(mapping)
         kwargs["dataset"] = DatasetConfig.from_dict(kwargs["dataset"])
@@ -743,20 +710,3 @@ class ExperimentConfig:
         if "seeds" in kwargs:
             kwargs["seeds"] = tuple(kwargs["seeds"])
         return cls(**kwargs)
-
-
-__all__ = [
-    "DEFAULT_SEEDS",
-    "CheckpointConfig",
-    "ConfigValidationError",
-    "DatasetConfig",
-    "EvaluationConfig",
-    "ExperimentConfig",
-    "FeaturePipelineConfig",
-    "MLflowTrackingConfig",
-    "ModelConfig",
-    "OptimizerConfig",
-    "PhaseSelectionConfig",
-    "SchedulerConfig",
-    "TrainingControlConfig",
-]

@@ -15,14 +15,12 @@ logger = logging.getLogger(__name__)
 
 def _require_pcm16(sample_width: int) -> None:
     """Validate that operations run on 16-bit PCM data."""
-
     if sample_width != 2:
         raise ValueError("Only 16-bit PCM audio is supported.")
 
 
 def _frames_to_int16_samples(frames: bytes, sample_width: int) -> list[int]:
     """Convert PCM16 frames into a list of signed 16-bit integer samples."""
-
     _require_pcm16(sample_width)
     samples = array("h")
     samples.frombytes(frames[: len(frames) - (len(frames) % 2)])
@@ -31,14 +29,12 @@ def _frames_to_int16_samples(frames: bytes, sample_width: int) -> list[int]:
 
 def _int16_samples_to_frames(samples: list[int]) -> bytes:
     """Convert a list of integer samples back into PCM16 byte frames with clipping."""
-
     clipped = array("h", [max(-32768, min(32767, sample)) for sample in samples])
     return clipped.tobytes()
 
 
 def _pcm_avg(frames: bytes, sample_width: int) -> int:
     """Return the integer mean sample value of PCM16 frames."""
-
     samples = _frames_to_int16_samples(frames, sample_width)
     if not samples:
         return 0
@@ -47,7 +43,6 @@ def _pcm_avg(frames: bytes, sample_width: int) -> int:
 
 def _pcm_rms(frames: bytes, sample_width: int) -> int:
     """Return RMS energy for a PCM16 byte stream."""
-
     samples = _frames_to_int16_samples(frames, sample_width)
     if not samples:
         return 0
@@ -57,21 +52,18 @@ def _pcm_rms(frames: bytes, sample_width: int) -> int:
 
 def _pcm_bias(frames: bytes, sample_width: int, bias: int) -> bytes:
     """Add a constant bias to all PCM16 samples."""
-
     samples = _frames_to_int16_samples(frames, sample_width)
     return _int16_samples_to_frames([sample + bias for sample in samples])
 
 
 def _pcm_mul(frames: bytes, sample_width: int, factor: float) -> bytes:
     """Scale PCM16 samples by a floating-point factor."""
-
     samples = _frames_to_int16_samples(frames, sample_width)
     return _int16_samples_to_frames([round(sample * factor) for sample in samples])
 
 
 def _pcm_add(left: bytes, right: bytes, sample_width: int) -> bytes:
     """Add two PCM16 byte streams sample-wise."""
-
     left_samples = _frames_to_int16_samples(left, sample_width)
     right_samples = _frames_to_int16_samples(right, sample_width)
     sample_count = min(len(left_samples), len(right_samples))
@@ -84,7 +76,6 @@ class UnknownSampleGenerationMixin:
 
     def _create_unknown_label_samples(self, minimum_total: int | None = None) -> None:
         """Create the __unknown__ label as interpolation of existing samples."""
-
         logger.info("Creating __unknown__ label samples as interpolation of existing samples.")
 
         unknown_dir = self.dataset_root / "train" / "audio" / self.UNKNOWN_LABEL
@@ -202,7 +193,6 @@ class UnknownSampleGenerationMixin:
         max_attempts: int,
     ) -> tuple[list[Path], tuple[str, ...]] | None:
         """Pick 2 or 3 source files uniquely by sample IDs, with class diversity only."""
-
         blend_count = 3 if len(available_labels) >= 3 and rng.random() < 0.6 else 2
         blend_count = min(blend_count, len(available_labels))
 
@@ -228,7 +218,6 @@ class UnknownSampleGenerationMixin:
         rng: random.Random,
     ) -> bytes:
         """Blend two or three clips with smooth speech-like overlap."""
-
         if len(source_paths) < 2:
             return b""
 
@@ -324,7 +313,6 @@ class UnknownSampleGenerationMixin:
 
     def _get_unknown_source_profile(self, path: Path) -> tuple[str, float]:
         """Return a cached (gender_bucket, peak_fraction) profile for a source clip."""
-
         cache_key = path.as_posix()
         cached_profile = self._unknown_source_profile_cache.get(cache_key)
         if cached_profile is not None:
@@ -350,7 +338,6 @@ class UnknownSampleGenerationMixin:
         channels: int,
     ) -> str:
         """Heuristically bucket a voice as male or female using zero-crossing pitch estimates."""
-
         if sample_width != 2 or sample_rate <= 0:
             return "unknown"
 
@@ -393,7 +380,6 @@ class UnknownSampleGenerationMixin:
         channels: int,
     ) -> float:
         """Estimate where the loudest part of a clip occurs, as a fraction of its duration."""
-
         if sample_width != 2 or sample_rate <= 0:
             return 0.5
 
@@ -427,7 +413,6 @@ class UnknownSampleGenerationMixin:
         channels: int,
     ) -> list[int]:
         """Convert PCM16 frames to mono integer samples."""
-
         if sample_width != 2:
             return []
 
@@ -443,7 +428,6 @@ class UnknownSampleGenerationMixin:
 
     def _samples_to_frames(self, samples: list[int]) -> bytes:
         """Convert int16 samples to PCM16 frames."""
-
         clipped_samples = array(
             "h",
             [max(-32768, min(32767, sample)) for sample in samples],
@@ -452,7 +436,6 @@ class UnknownSampleGenerationMixin:
 
     def _slot_weight(self, time_point: float, slot_index: int, source_count: int) -> float:
         """Return a broad smooth weight with a nonzero floor for one source."""
-
         center = (slot_index + 1) / (source_count + 1)
         half_width = 0.42 if source_count == 2 else 0.34
         floor_weight = 0.24 if source_count == 2 else 0.16
@@ -475,7 +458,6 @@ class UnknownSampleGenerationMixin:
         rng: random.Random,
     ) -> bytes:
         """Normalize and lightly smear a source clip before blending."""
-
         if not frames:
             return b""
 
@@ -509,7 +491,6 @@ class UnknownSampleGenerationMixin:
         channels: int,
     ) -> bool:
         """Reject samples with obvious discontinuities or multiple separated loud peaks."""
-
         mono_samples = self._frames_to_mono_samples(frames, sample_width, channels)
         if len(mono_samples) < max(1, sample_rate // 4):
             return False
@@ -554,7 +535,6 @@ class UnknownSampleGenerationMixin:
         phase: float,
     ) -> float:
         """Return a slow, high-floor weight so all sources stay present throughout the clip."""
-
         base_weight = 0.72 / source_count
         modulation = 0.28 / source_count
         envelope = 0.5 * (1.0 + math.cos(math.tau * time_point + phase))
@@ -562,13 +542,11 @@ class UnknownSampleGenerationMixin:
 
     def _expected_peak_positions(self, source_count: int) -> list[float]:
         """Return ideal peak locations for the ordered source peaks."""
-
         if source_count == 2:
             return [0.32, 0.68]
         return [0.18, 0.50, 0.82]
 
     def _gaussian_weight(self, time_point: float, center: float, width: float) -> float:
         """Return a smooth window weight for a clip centered at time_point."""
-
         distance = (time_point - center) / width
         return math.exp(-0.5 * distance * distance)

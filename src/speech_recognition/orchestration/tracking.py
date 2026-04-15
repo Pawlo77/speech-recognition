@@ -1,5 +1,6 @@
 """Local MLflow tracking helpers for resumable runs."""
 
+import contextlib
 import importlib
 import importlib.metadata
 import json
@@ -8,7 +9,6 @@ import os
 import platform
 import shutil
 import subprocess
-import tempfile
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -22,7 +22,11 @@ import torch
 from ..config import ExperimentConfig, MLflowTrackingConfig
 from ..models import DEFAULT_INPUT_BINS, DEFAULT_TARGET_FRAMES, build_model_adapter
 
+os.environ["MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING"] = "true"
+
 _EFFICIENCY_CACHE: dict[str, dict[str, float]] = {}
+_TRACKING_LOGGER = logging.getLogger(__name__)
+_ACTIVE_MLFLOW_RUN_ID_ENV = "SPEECH_MLFLOW_ACTIVE_RUN_ID"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +68,6 @@ class ReproducibilityReport:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the report."""
-
         return {
             "processor": self.processor,
             "system": self.system,
@@ -87,7 +90,6 @@ class ReproducibilityReport:
 
 def collect_reproducibility_report() -> ReproducibilityReport:
     """Capture the processor, PyTorch version, and current git commit hash."""
-
     repo_root = Path(__file__).resolve().parents[3]
     git_commit_hash = _read_git_commit_hash(repo_root)
     git_branch = _read_git_branch(repo_root)
@@ -116,7 +118,6 @@ def collect_reproducibility_report() -> ReproducibilityReport:
 
 def _read_git_commit_hash(repo_root: Path) -> str:
     """Read the current commit hash from the local git metadata."""
-
     git_dir = repo_root / ".git"
     head_path = git_dir / "HEAD"
     if git_dir.is_file():
@@ -143,7 +144,6 @@ def _read_git_commit_hash(repo_root: Path) -> str:
 
 def _read_git_branch(repo_root: Path) -> str:
     """Read the current git branch or detached HEAD description."""
-
     git_dir = repo_root / ".git"
     head_path = git_dir / "HEAD"
     if git_dir.is_file():
@@ -164,7 +164,6 @@ def _read_git_branch(repo_root: Path) -> str:
 
 def _read_git_status_porcelain(repo_root: Path) -> str:
     """Read the working tree status in porcelain format."""
-
     try:
         git_executable = shutil.which("git")
         if git_executable is None:
@@ -183,7 +182,6 @@ def _read_git_status_porcelain(repo_root: Path) -> str:
 
 def _read_total_ram_bytes() -> int:
     """Read total physical RAM in bytes with platform-aware fallbacks."""
-
     try:
         pages = os.sysconf("SC_PHYS_PAGES")
         page_size = os.sysconf("SC_PAGE_SIZE")
@@ -214,7 +212,6 @@ def _read_total_ram_bytes() -> int:
 
 def _read_total_disk_bytes(repo_root: Path) -> int:
     """Read total filesystem capacity for the repository volume in bytes."""
-
     try:
         return int(shutil.disk_usage(repo_root).total)
     except OSError:
@@ -223,7 +220,6 @@ def _read_total_disk_bytes(repo_root: Path) -> int:
 
 def _collect_installed_packages() -> dict[str, str]:
     """Collect installed package versions for the active Python environment."""
-
     packages: dict[str, str] = {}
     for distribution in importlib.metadata.distributions():
         name = distribution.metadata.get("Name")
@@ -237,16 +233,29 @@ def _collect_installed_packages() -> dict[str, str]:
 @lru_cache(maxsize=1)
 def _cached_installed_packages() -> dict[str, str]:
     """Return a cached package-version snapshot for the active environment."""
-
     return _collect_installed_packages()
 
 
 def _resolve_tracking_uri(tracking_uri: str) -> str:
     """Resolve local tracking URIs to an absolute path when needed."""
+    if tracking_uri.startswith("sqlite:"):
+        sqlite_target = tracking_uri.removeprefix("sqlite:")
+        if sqlite_target.lstrip("/") == ":memory:":
+            return "sqlite:///:memory:"
 
-    if tracking_uri.startswith("sqlite:///"):
-        db_path = Path(tracking_uri.removeprefix("sqlite:///"))
-        resolved_db_path = db_path.expanduser().resolve()
+        if sqlite_target.startswith("///"):
+            db_target = sqlite_target[3:]
+        elif sqlite_target.startswith("//"):
+            db_target = sqlite_target[2:]
+        elif sqlite_target.startswith("/"):
+            db_target = sqlite_target[1:]
+        else:
+            db_target = sqlite_target
+
+        if not db_target:
+            db_target = "mlruns.db"
+
+        resolved_db_path = Path(db_target).expanduser().resolve()
         resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
         return f"sqlite:///{resolved_db_path.as_posix()}"
 
@@ -260,7 +269,6 @@ def _resolve_tracking_uri(tracking_uri: str) -> str:
 
 def _flatten_params(prefix: str, value: Any) -> dict[str, str]:
     """Flatten nested config values into MLflow-compatible parameter strings."""
-
     flattened: dict[str, str] = {}
     if isinstance(value, Mapping):
         for key, nested_value in value.items():
@@ -301,10 +309,11 @@ class MlflowRunTracker:
     """Checkpoint artifact paths already logged for this run."""
     _latest_checkpoint_tag_value: str | None = field(default=None, init=False, repr=False)
     """Last checkpoint path tag value sent to MLflow."""
+    _logged_checkpoint_artifact_value: str | None = field(default=None, init=False, repr=False)
+    """Last checkpoint artifact pointer tag value sent to MLflow."""
 
     def start(self) -> None:
         """Start a run and log static hyperparameters and efficiency metrics."""
-
         if not self.tracking.enabled:
             return
 
@@ -322,6 +331,10 @@ class MlflowRunTracker:
                 mlflow.start_run(run_name=self.run_name or self.tracking.run_name)
             self._mlflow = mlflow
             self._run_active = True
+            active_run = mlflow.active_run()
+            if active_run is not None:
+                os.environ[_ACTIVE_MLFLOW_RUN_ID_ENV] = active_run.info.run_id
+            mlflow.set_tag("pipeline.run_name", self.run_name)
 
             if self.tracking.log_params:
                 mlflow.log_params(_flatten_params("", self.experiment_config.to_dict()))
@@ -371,43 +384,47 @@ class MlflowRunTracker:
 
     def _log_reproducibility_report(self, mlflow: Any) -> None:
         """Persist the reproducibility snapshot as an MLflow artifact."""
-
         report = collect_reproducibility_report()
         if self.tracking.log_metrics:
             mlflow.log_metrics(
                 {
                     "hardware_total_ram_bytes": float(report.total_ram_bytes),
-                    "hardware_total_disk_bytes": float(report.total_disk_bytes),
                 },
                 step=0,
             )
         mlflow.set_tag("hardware.total_ram_bytes", str(report.total_ram_bytes))
-        mlflow.set_tag("hardware.total_disk_bytes", str(report.total_disk_bytes))
-        with tempfile.TemporaryDirectory() as temporary_dir:
-            report_path = Path(temporary_dir) / "reproducibility_report.json"
-            report_path.write_text(
-                json.dumps(report.to_dict(), indent=2, sort_keys=True),
-                encoding="utf-8",
-            )
-            mlflow.log_artifact(str(report_path))
+        self._log_json_artifact("reproducibility_report.json", report.to_dict(), force=True)
 
-    def _log_json_artifact(self, artifact_name: str, payload: Mapping[str, Any]) -> None:
-        """Persist a JSON payload as an MLflow artifact."""
-
-        if not self._run_active or self._mlflow is None or not self.tracking.log_artifacts:
+    def _log_json_artifact(
+        self,
+        artifact_name: str,
+        payload: Mapping[str, Any],
+        *,
+        force: bool = False,
+    ) -> None:
+        """Persist a JSON payload via MLflow, or print it to console."""
+        if not force and not self.tracking.log_artifacts:
             return
 
-        with tempfile.TemporaryDirectory() as temporary_dir:
-            artifact_path = Path(temporary_dir) / artifact_name
-            artifact_path.write_text(
+        if self._run_active and self._mlflow is not None:
+            log_dict = getattr(self._mlflow, "log_dict", None)
+            if callable(log_dict):
+                log_dict(dict(payload), artifact_name)
+                return
+            self._mlflow.log_text(
                 json.dumps(payload, indent=2, sort_keys=True),
-                encoding="utf-8",
+                artifact_name,
             )
-            self._mlflow.log_artifact(str(artifact_path))
+            return
+
+        _TRACKING_LOGGER.info(
+            "MLflow inactive; %s payload follows:\n%s",
+            artifact_name,
+            json.dumps(payload, indent=2, sort_keys=True),
+        )
 
     def log_training_metrics(
         self,
-        *,
         loss: float | None = None,
         validation_macro_f1: float | None = None,
         checkpoint_path: str | Path | None = None,
@@ -416,10 +433,6 @@ class MlflowRunTracker:
         extra_metrics: Mapping[str, float] | None = None,
     ) -> None:
         """Log dynamic training metrics and checkpoint metadata."""
-
-        if not self._run_active or self._mlflow is None:
-            return
-
         if (
             loss is None
             and validation_macro_f1 is None
@@ -437,6 +450,22 @@ class MlflowRunTracker:
             metrics["validation_macro_f1"] = float(validation_macro_f1)
         if extra_metrics is not None:
             metrics.update({key: float(value) for key, value in extra_metrics.items()})
+
+        if not self._run_active or self._mlflow is None:
+            if metrics:
+                _TRACKING_LOGGER.info(
+                    "MLflow inactive; metrics step=%s: %s",
+                    step,
+                    json.dumps(metrics, sort_keys=True),
+                )
+            if epoch is not None:
+                _TRACKING_LOGGER.info("MLflow inactive; epoch=%s step=%s", epoch, step)
+            if checkpoint_path is not None:
+                _TRACKING_LOGGER.info(
+                    "MLflow inactive; latest checkpoint: %s",
+                    str(checkpoint_path),
+                )
+            return
 
         if self.tracking.log_metrics and metrics:
             self._mlflow.log_metrics(metrics, step=step)
@@ -459,12 +488,36 @@ class MlflowRunTracker:
                 and checkpoint.exists()
                 and checkpoint_key not in self._logged_checkpoint_paths
             ):
-                self._mlflow.log_artifact(str(checkpoint))
+                checkpoint_artifact = _checkpoint_artifact_path(checkpoint)
+                self._mlflow.log_artifact(
+                    str(checkpoint),
+                    artifact_path=str(Path(checkpoint_artifact).parent),
+                )
+                if checkpoint_artifact != self._logged_checkpoint_artifact_value:
+                    self._mlflow.set_tag("latest_checkpoint_artifact", checkpoint_artifact)
+                    self._logged_checkpoint_artifact_value = checkpoint_artifact
                 self._logged_checkpoint_paths.add(checkpoint_key)
+
+    def _cleanup_logged_checkpoints(self) -> None:
+        """Delete uploaded local checkpoint files when retention is disabled."""
+        if self.tracking.retain_local_checkpoints:
+            return
+        for checkpoint_path in self._logged_checkpoint_paths:
+            checkpoint = Path(checkpoint_path)
+            with contextlib.suppress(OSError):
+                checkpoint.unlink()
+
+            # Best-effort pruning of empty checkpoint directories left behind.
+            for parent in checkpoint.parents:
+                with contextlib.suppress(OSError):
+                    parent.rmdir()
+
+    def log_named_json_artifact(self, artifact_name: str, payload: Mapping[str, Any]) -> None:
+        """Public helper for logging a JSON artifact through the active tracker."""
+        self._log_json_artifact(artifact_name, payload)
 
     def log_payload(self, payload: Mapping[str, Any]) -> None:
         """Recursively log any training-style fields found in a payload."""
-
         metrics = payload.get("metrics") if isinstance(payload.get("metrics"), Mapping) else {}
         checkpoint_path = payload.get("checkpoint_path")
         epoch = payload.get("epoch")
@@ -494,20 +547,21 @@ class MlflowRunTracker:
 
     def close(self) -> None:
         """End the active MLflow run if one was started."""
-
         if self._run_active and self._mlflow is not None:
             try:
                 self._mlflow.end_run()
             finally:
+                self._cleanup_logged_checkpoints()
                 self._run_active = False
                 self._mlflow = None
+                os.environ.pop(_ACTIVE_MLFLOW_RUN_ID_ENV, None)
                 self._logged_checkpoint_paths.clear()
                 self._latest_checkpoint_tag_value = None
+                self._logged_checkpoint_artifact_value = None
 
 
 def build_mlflow_tracker(experiment_config: ExperimentConfig, run_name: str) -> MlflowRunTracker:
     """Construct a tracker using the current experiment configuration."""
-
     model_adapter = build_model_adapter(
         family=experiment_config.model.family,
         num_classes=experiment_config.model.num_classes,
@@ -524,7 +578,6 @@ def build_mlflow_tracker(experiment_config: ExperimentConfig, run_name: str) -> 
 
 def _flatten_numeric_metrics(value: Mapping[str, Any], prefix: str = "") -> dict[str, float]:
     """Flatten nested metric mappings into numeric leaf metrics."""
-
     flattened: dict[str, float] = {}
     for key, item in value.items():
         metric_name = f"{prefix}.{key}" if prefix else str(key)
@@ -537,7 +590,6 @@ def _flatten_numeric_metrics(value: Mapping[str, Any], prefix: str = "") -> dict
 
 def _extract_phase_performance_metrics(payload: Mapping[str, Any]) -> dict[str, float]:
     """Extract runtime/resource metrics from top-level and phase outputs."""
-
     metrics: dict[str, float] = {}
 
     direct_performance = payload.get("performance")
@@ -570,7 +622,6 @@ def _extract_phase_performance_metrics(payload: Mapping[str, Any]) -> dict[str, 
 
 def _extract_decisions(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Extract high-level model selection decisions from run payload."""
-
     keys = (
         "phase",
         "best_trial",
@@ -587,3 +638,11 @@ def _extract_decisions(payload: Mapping[str, Any]) -> dict[str, Any]:
         "ensemble_results",
     )
     return {key: payload[key] for key in keys if key in payload}
+
+
+def _checkpoint_artifact_path(checkpoint: Path) -> str:
+    """Return a stable MLflow artifact path for a checkpoint file."""
+    component = checkpoint.parent.name
+    if component in {"gate", "command", "non_command", "shared_two_head"}:
+        return f"checkpoints/{component}/{checkpoint.name}"
+    return f"checkpoints/{checkpoint.name}"

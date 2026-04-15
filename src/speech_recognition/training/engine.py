@@ -20,12 +20,15 @@ from tqdm.auto import tqdm
 from ..config import TrainingControlConfig
 
 _CHECKPOINT_PATTERN = re.compile(r"^checkpoint_step_(\d+)$")
+"""Regular expression pattern for validating and extracting
+step numbers from checkpoint filenames."""
 _TRAIN_MAX_STEPS_ENV = "SPEECH_TRAIN_MAX_STEPS"
+"""Environment variable name for an optional max training step override,
+used for smoke checks."""
 
 
 def _max_train_steps_override() -> int | None:
     """Return an optional max-step override used for smoke checks."""
-
     raw_limit = os.environ.get(_TRAIN_MAX_STEPS_ENV)
     if raw_limit in {None, ""}:
         return None
@@ -57,7 +60,6 @@ class TrainingCheckpoint:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a plain dictionary suitable for torch.save."""
-
         return {
             "model_state_dict": self.model_state_dict,
             "optimizer_state_dict": self.optimizer_state_dict,
@@ -70,7 +72,6 @@ class TrainingCheckpoint:
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "TrainingCheckpoint":
         """Build a checkpoint from a loaded payload."""
-
         return cls(
             model_state_dict=dict(payload["model_state_dict"]),
             optimizer_state_dict=dict(payload["optimizer_state_dict"]),
@@ -116,7 +117,6 @@ class TrainingEngine:
 
     def _autocast_context(self) -> contextlib.AbstractContextManager[Any]:
         """Return an autocast context only when mixed precision is enabled."""
-
         if not self.use_mixed_precision:
             return nullcontext()
 
@@ -128,7 +128,6 @@ class TrainingEngine:
 
     def _unpack_batch(self, batch: Any) -> tuple[Tensor, Tensor]:
         """Normalize common batch layouts into input and target tensors."""
-
         if isinstance(batch, Mapping):
             inputs = batch["inputs"]
             targets = batch["targets"]
@@ -140,13 +139,11 @@ class TrainingEngine:
 
     def _move_batch(self, batch: Any) -> tuple[Tensor, Tensor]:
         """Move a batch to the active training device."""
-
         inputs, targets = self._unpack_batch(batch)
         return inputs.to(self.device), targets.to(self.device)
 
     def _capture_rng_state(self) -> dict[str, Any]:
         """Capture Python, NumPy, and PyTorch RNG states."""
-
         return {
             "python": random.getstate(),
             "numpy": np.random.get_state(),
@@ -155,14 +152,12 @@ class TrainingEngine:
 
     def _restore_rng_state(self, rng_state: Mapping[str, Any]) -> None:
         """Restore Python, NumPy, and PyTorch RNG states."""
-
         random.setstate(rng_state["python"])
         np.random.set_state(rng_state["numpy"])
         torch.set_rng_state(rng_state["torch"].cpu())
 
     def _checkpoint_path(self, step: int) -> Path:
         """Return the path for a numbered checkpoint file."""
-
         return self.checkpoint_dir / f"checkpoint_step_{step:010d}.pt"
 
     def _sorted_checkpoint_paths(self) -> list[Path]:
@@ -181,7 +176,6 @@ class TrainingEngine:
 
     def _prune_old_checkpoints(self) -> None:
         """Delete old checkpoint files, keeping only the most recent N files."""
-
         checkpoints = self._sorted_checkpoint_paths()
         excess = len(checkpoints) - self.keep_last_n
         if excess <= 0:
@@ -192,14 +186,12 @@ class TrainingEngine:
 
     def _atomic_torch_save(self, payload: Mapping[str, Any], path: Path) -> None:
         """Persist a checkpoint atomically via a temporary file."""
-
         temporary_path = path.with_suffix(f"{path.suffix}.tmp")
         torch.save(payload, temporary_path)
         temporary_path.replace(path)
 
-    def save_checkpoint(self, *, epoch: int, step: int) -> Path:
+    def save_checkpoint(self, epoch: int, step: int) -> Path:
         """Save the current training state and return the file path."""
-
         checkpoint = TrainingCheckpoint(
             model_state_dict=self.model.state_dict(),
             optimizer_state_dict=self.optimizer.state_dict(),
@@ -217,7 +209,6 @@ class TrainingEngine:
 
     def _load_checkpoint_payload(self, path: Path) -> TrainingCheckpoint:
         """Load and validate a checkpoint payload from disk."""
-
         payload = torch.load(path, map_location=self.device, weights_only=False)
         if not isinstance(payload, Mapping):
             raise ValueError("Checkpoint payload must be a mapping.")
@@ -225,12 +216,13 @@ class TrainingEngine:
 
     def load_latest_checkpoint(self) -> tuple[TrainingCheckpoint, Path] | None:
         """Return the newest valid checkpoint, skipping corrupt files."""
-
         candidates = sorted(
             self.checkpoint_dir.glob("checkpoint_step_*.pt"),
-            key=lambda candidate: int(_CHECKPOINT_PATTERN.match(candidate.stem).group(1))
-            if _CHECKPOINT_PATTERN.match(candidate.stem)
-            else -1,
+            key=lambda candidate: (
+                int(_CHECKPOINT_PATTERN.match(candidate.stem).group(1))
+                if _CHECKPOINT_PATTERN.match(candidate.stem)
+                else -1
+            ),
             reverse=True,
         )
         for candidate in candidates:
@@ -243,7 +235,6 @@ class TrainingEngine:
 
     def _restore_checkpoint(self, checkpoint: TrainingCheckpoint) -> None:
         """Restore model, optimizer, scheduler, and RNG state from a checkpoint."""
-
         self.model.load_state_dict(checkpoint.model_state_dict)
         self.optimizer.load_state_dict(checkpoint.optimizer_state_dict)
         if self.scheduler is not None and checkpoint.scheduler_state_dict is not None:
@@ -252,7 +243,6 @@ class TrainingEngine:
 
     def _train_batch(self, batch: Any) -> float:
         """Run a single optimization step and return the batch loss."""
-
         inputs, targets = self._move_batch(batch)
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
@@ -267,7 +257,6 @@ class TrainingEngine:
 
     def evaluate(self, data_loader: Any) -> dict[str, float]:
         """Evaluate loss and macro-F1 over a validation loader."""
-
         self.model.eval()
         total_loss = 0.0
         total_examples = 0
@@ -307,7 +296,6 @@ class TrainingEngine:
         periodic training/validation metrics and checkpoint artifacts will be
         forwarded to the tracker (e.g., an MLflow tracker).
         """
-
         max_train_steps = _max_train_steps_override()
         if val_loader is not None:
             _ = len(val_loader)
@@ -490,7 +478,6 @@ class TrainingEngine:
 
 def select_training_device() -> torch.device:
     """Prefer MPS when available, otherwise fall back to CPU."""
-
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
@@ -498,7 +485,6 @@ def select_training_device() -> torch.device:
 
 def _macro_f1_score(targets: Sequence[int], predictions: Sequence[int]) -> float:
     """Compute a macro-F1 score without external dependencies."""
-
     labels = sorted(set(targets) | set(predictions))
     if not labels:
         return 0.0

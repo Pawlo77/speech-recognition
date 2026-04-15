@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 class _SpeechCommandsSplitMixin:
     def _write_unknown_origin_map(self) -> None:
         """Persist mapping from merged unknown samples to original source labels."""
-
         train_audio_dir = self.dataset_root / "train" / "audio"
         if not train_audio_dir.exists():
             return
@@ -439,7 +438,6 @@ class _SpeechCommandsSplitMixin:
 
     def _regenerate_split_lists(self) -> None:
         """Generate all split-list variants according to the project split policy."""
-
         train_audio_dir = self.dataset_root / "train" / "audio"
         if not train_audio_dir.exists():
             raise FileNotFoundError(f"Missing train audio directory: {train_audio_dir}")
@@ -464,6 +462,7 @@ class _SpeechCommandsSplitMixin:
         self._create_extended_lists(official_train, official_val, official_test)
 
     def _is_target_rel_path(self, rel_path: str) -> bool:
+        """Return whether a relative path belongs to a target command label."""
         label = Path(rel_path).parts[0]
         return label in self.TARGET_COMMAND_LABELS
 
@@ -474,7 +473,6 @@ class _SpeechCommandsSplitMixin:
         official_test: set[str],
     ) -> None:
         """Create full split lists over all available target-command samples only."""
-
         train_rel_paths = sorted([rel for rel in official_train if self._is_target_rel_path(rel)])
         val_rel_paths = sorted([rel for rel in official_val if self._is_target_rel_path(rel)])
         test_rel_paths = sorted([rel for rel in official_test if self._is_target_rel_path(rel)])
@@ -492,7 +490,6 @@ class _SpeechCommandsSplitMixin:
 
     def _create_small_command_lists(self, all_rel_paths: list[str]) -> None:
         """Create deterministic small command-only splits with fixed per-class sizes."""
-
         rng = random.Random(self.seed)  # noqa: S311 - deterministic subset only
         train_rel_paths: list[str] = []
         val_rel_paths: list[str] = []
@@ -536,16 +533,15 @@ class _SpeechCommandsSplitMixin:
         )
 
     def _canonical_label_from_rel_path(self, rel_path: str) -> str:
+        """Return the canonical label for a relative path, mapping all unknowns to UNKNOWN_LABEL."""
         return self._canonicalize_label(Path(rel_path).parts[0])
 
     def _raw_label_from_rel_path(self, rel_path: str) -> str:
         """Return the original top-level label directory name for a relative path."""
-
         return Path(rel_path).parts[0]
 
     def _is_original_unknown_rel_path(self, rel_path: str) -> bool:
         """Return whether a path belongs to an original non-target, non-silence unknown label."""
-
         raw_label = self._raw_label_from_rel_path(rel_path)
         return raw_label not in {
             *self.TARGET_COMMAND_LABELS,
@@ -556,7 +552,6 @@ class _SpeechCommandsSplitMixin:
 
     def _collect_synthetic_unknown_rel_paths(self, train_audio_dir: Path) -> list[str]:
         """Collect generated unknown WAV paths from the synthetic unknown directory."""
-
         unknown_dir = train_audio_dir / self.UNKNOWN_LABEL
         if not unknown_dir.exists():
             return []
@@ -567,7 +562,6 @@ class _SpeechCommandsSplitMixin:
 
     def _unknown_dedup_key(self, rel_path: str, train_audio_dir: Path) -> str:
         """Return dedup key for unknown sample using content hash."""
-
         path = train_audio_dir / rel_path
         return hashlib.sha1(path.read_bytes()).hexdigest()  # noqa: S324 - non-security hashing
 
@@ -578,7 +572,6 @@ class _SpeechCommandsSplitMixin:
         rng: random.Random,
     ) -> list[str]:
         """Balance one extended split: keep all commands/silence, cap and dedupe unknown."""
-
         command_paths = [
             rel
             for rel in rel_paths
@@ -619,7 +612,6 @@ class _SpeechCommandsSplitMixin:
         official_test: set[str],
     ) -> None:
         """Create balanced extended split lists with all 12 classes present."""
-
         train_audio_dir = self.dataset_root / "train" / "audio"
         rng = random.Random(self.seed)  # noqa: S311 - deterministic balancing only
 

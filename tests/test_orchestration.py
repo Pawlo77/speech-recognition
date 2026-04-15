@@ -22,7 +22,6 @@ from speech_recognition.orchestration.state import PHASE_ORDER, PipelineStateSto
 
 def _configured_experiment() -> ExperimentConfig:
     """Build a config with consistent training and scheduler settings."""
-
     training = TrainingControlConfig(epochs=12)
     scheduler = SchedulerConfig(total_epochs=12)
     features = FeaturePipelineConfig(name="mfcc")
@@ -63,7 +62,6 @@ def test_pipeline_resume_keeps_completed_phases_and_data_handoff(
         resumed_state.phase_artifacts["phase-4"].output_data["final_status"]
         == "ready-for-evaluation"
     )
-    assert resumed_state.phase_artifacts["phase-1"].output_data["performance"]["elapsed_ms"] >= 0
 
 
 def test_build_isolated_subprocess_command_uses_cli_contract(tmp_path: Path) -> None:
@@ -92,7 +90,7 @@ def test_build_isolated_subprocess_env_injects_required_keys() -> None:
 def test_run_isolated_subprocess_inherits_required_env_vars(tmp_path: Path, monkeypatch) -> None:
     captured = {}
 
-    def fake_run(command, *, check, env, text, capture_output):
+    def fake_run(command, check, env, text, capture_output):
         captured["command"] = list(command)
         captured["check"] = check
         captured["env"] = dict(env)

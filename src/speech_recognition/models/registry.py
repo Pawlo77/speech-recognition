@@ -12,13 +12,10 @@ from ..config import ModelConfig
 
 NUM_KAGGLE_CLASSES: Final[int] = 12
 """Number of classes in the 12-class KWS label space."""
-
 DEFAULT_TARGET_FRAMES: Final[int] = 101
 """Temporal size for a 1-second baseline STFT-like feature tensor."""
-
 DEFAULT_INPUT_BINS: Final[int] = 128
 """Default feature-bin count used by the feature extraction stack."""
-
 SOURCE_LIBRARY_BY_FAMILY: Final[dict[str, tuple[str, ...]]] = {
     "ast": ("transformers",),
     "convnext": ("torchvision", "timm"),
@@ -27,14 +24,12 @@ SOURCE_LIBRARY_BY_FAMILY: Final[dict[str, tuple[str, ...]]] = {
     "mlp_mixer": ("timm",),
 }
 """Official source libraries for each registry family."""
-
 MLP_MIXER_MODEL_NAME: Final[str] = "gmixer_24_224"
 """Official timm MLP-family model used for the mlp_mixer track."""
 
 
 def _apply_kaiming_initialization(module: nn.Module) -> None:
     """Apply Kaiming normal initialization to trainable affine and convolution layers."""
-
     for child_module in module.modules():
         if isinstance(child_module, nn.Conv1d | nn.Conv2d | nn.Linear):
             nn_init.kaiming_normal_(child_module.weight, nonlinearity="relu")
@@ -64,6 +59,7 @@ class LogitNormalizationWrapper(nn.Module):
         self.normalize_logits = normalize_logits
 
     def forward(self, inputs: Tensor) -> Tensor:
+        """Run a forward pass and optionally L2-normalize the output logits."""
         logits = self.model(inputs)
         if self.normalize_logits:
             logits = nn.functional.normalize(logits, p=2.0, dim=-1)
@@ -92,7 +88,6 @@ class KWSModelAdapter(nn.Module):
 
     def validate_input_shape(self, input_tensor: Tensor) -> Tensor:
         """Normalize shape to [B, 1, bins, frames] and clamp temporal outliers."""
-
         if input_tensor.dim() == 2:
             normalized = input_tensor.unsqueeze(0).unsqueeze(0)
         elif input_tensor.dim() == 3:
@@ -116,7 +111,6 @@ class KWSModelAdapter(nn.Module):
 
     def forward_pass(self, input_tensor: Tensor) -> Tensor:
         """Run a forward pass and return logits with shape [B, num_classes]."""
-
         normalized = self.validate_input_shape(input_tensor)
         if self.family == "ast" and self.ast_uses_three_channels:
             normalized = normalized.repeat(1, 3, 1, 1)
@@ -138,7 +132,6 @@ class KWSModelAdapter(nn.Module):
 
     def profile_efficiency(self, input_tensor: Tensor) -> dict[str, int]:
         """Profile MACs and parameter count with fvcore on normalized input."""
-
         from fvcore.nn import FlopCountAnalysis, parameter_count
 
         normalized = self.validate_input_shape(input_tensor)
@@ -162,7 +155,6 @@ class KWSModelAdapter(nn.Module):
 
     def forward(self, input_tensor: Tensor) -> Tensor:
         """Delegate ``nn.Module`` forward to ``forward_pass``."""
-
         return self.forward_pass(input_tensor)
 
 
@@ -183,7 +175,6 @@ class ModelRegistry:
 
     def supported_families(self) -> tuple[str, ...]:
         """Return registry family names in deterministic order."""
-
         return tuple(sorted(self._builders))
 
     def create(
@@ -195,7 +186,6 @@ class ModelRegistry:
         model_config: ModelConfig | None = None,
     ) -> KWSModelAdapter:
         """Build a family adapter with the shared KWS interface."""
-
         if model_config is None:
             if family is None:
                 raise ValueError("Either model_config or family must be provided.")
@@ -228,7 +218,6 @@ def build_model_adapter(
     model_config: ModelConfig | None = None,
 ) -> KWSModelAdapter:
     """Factory helper around ``ModelRegistry`` for direct adapter construction."""
-
     effective_config = model_config or ModelConfig(
         family=family,
         num_classes=num_classes,
@@ -238,6 +227,9 @@ def build_model_adapter(
 
 
 def _dependency_error(family: str, dependency: str, err: Exception) -> RuntimeError:
+    """Helper to build a consistent error message when a
+    family-specific dependency fails to import or use.
+    """
     return RuntimeError(
         f"Unable to build '{family}' from official backend '{dependency}'. "
         f"Install/repair dependency '{dependency}'. Original error: {err!r}"
@@ -246,7 +238,6 @@ def _dependency_error(family: str, dependency: str, err: Exception) -> RuntimeEr
 
 def _build_ast_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool]:
     """Build AST from Hugging Face Transformers only."""
-
     try:
         transformers_module = importlib.import_module("transformers")
         ast_config_cls = transformers_module.ASTConfig
@@ -279,7 +270,6 @@ def _build_ast_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool
 
 def _build_convnext_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool]:
     """Build ConvNeXt from torchvision first, then timm as official fallback."""
-
     try:
         torchvision_models = importlib.import_module("torchvision.models")
         convnext_tiny_fn = torchvision_models.convnext_tiny
@@ -318,7 +308,6 @@ def _build_convnext_backbone(model_config: ModelConfig) -> tuple[nn.Module, str,
 
 def _build_ssamba_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool]:
     """Build SSAMBA from mamba-ssm only."""
-
     try:
         mamba_module = importlib.import_module("mamba_ssm")
         mamba_cls = mamba_module.Mamba
@@ -354,6 +343,7 @@ def _build_ssamba_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, b
             self.head = nn.Linear(d_model, model_config.num_classes)
 
         def forward(self, inputs: Tensor) -> Tensor:
+            """Run a forward pass through the mamba backbone and return logits."""
             sequence = inputs.mean(dim=2).transpose(1, 2)
             hidden = self.input_proj(sequence)
             if self.stride_frames > 1:
@@ -375,7 +365,6 @@ def _build_ssamba_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, b
 
 def _build_xlstm_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool]:
     """Build xLSTM from the official ``xlstm`` package."""
-
     try:
         xlstm_module = importlib.import_module("xlstm")
         feed_forward_config_cls = xlstm_module.FeedForwardConfig
@@ -418,6 +407,7 @@ def _build_xlstm_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bo
             self.head = nn.Linear(dim, model_config.num_classes)
 
         def forward(self, inputs: Tensor) -> Tensor:
+            """Run a forward pass through the xLSTM backbone and return logits."""
             sequence = inputs.mean(dim=2).transpose(1, 2)
             hidden = self.input_proj(sequence)
             hidden = self.xlstm(hidden)
@@ -431,7 +421,6 @@ def _build_xlstm_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bo
 
 def _build_mlp_mixer_backbone(model_config: ModelConfig) -> tuple[nn.Module, str, bool]:
     """Build MLP-Mixer from timm only."""
-
     try:
         timm = importlib.import_module("timm")
     except Exception as err:

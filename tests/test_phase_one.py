@@ -92,8 +92,8 @@ def test_phase_one_sweep_skips_completed_trials_and_persists_best_feature(
 
     calls: list[list[str]] = []
 
-    def fake_run(command, *, check, env, text, capture_output):
-        _ = check, env, text, capture_output
+    def fake_run(command, env, check):
+        _ = env, check
         calls.append(list(command))
         run_name = command[command.index("--run-name") + 1]
         child_state_path = output_dir / "phase_1" / "runs" / run_name / "state.json"
@@ -118,10 +118,13 @@ def test_phase_one_sweep_skips_completed_trials_and_persists_best_feature(
 
         class _CompletedProcess:
             returncode = 0
+            stdout = ""
 
         return _CompletedProcess()
 
-    monkeypatch.setattr("speech_recognition.orchestration.phase_one.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "speech_recognition.orchestration.phase_one.run_subprocess_with_live_output", fake_run
+    )
 
     payload = runner.execute()
 

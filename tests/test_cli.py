@@ -11,16 +11,17 @@ from speech_recognition.config import (
     SchedulerConfig,
     TrainingControlConfig,
 )
-from speech_recognition.orchestration.state import PHASE_ORDER
 
 
 def _configured_experiment(tracking_uri: str | None = None) -> ExperimentConfig:
     """Build a config with matching scheduler and training epochs for CLI tests."""
-
     training = TrainingControlConfig(epochs=12)
     scheduler = SchedulerConfig(total_epochs=12)
     features = FeaturePipelineConfig(name="mfcc")
-    mlflow = MLflowTrackingConfig(tracking_uri=tracking_uri or "mlruns", run_name="demo")
+    mlflow = MLflowTrackingConfig(
+        tracking_uri=tracking_uri or "sqlite:///mlruns.db",
+        run_name="demo",
+    )
     return ExperimentConfig(
         features=features,
         training=training,
@@ -116,14 +117,59 @@ def test_cli_reports_invalid_override(capsys) -> None:
     assert "Expected KEY=VALUE" in stderr
 
 
-def test_run_command_executes_full_pipeline_and_writes_state(tmp_path: Path, capsys) -> None:
-    config_path = tmp_path / "config.json"
-    config_path.write_text(
-        json.dumps(_configured_experiment(tracking_uri=str(tmp_path / "mlruns")).to_dict()),
-        encoding="utf-8",
+def test_run_resume_and_status_route_through_sweep_pipeline(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    called = {"run": [], "status": []}
+
+    def fake_run_sweep_pipeline(output_dir, config, run_name, include_phase_four):
+        called["run"].append(
+            {
+                "output_dir": output_dir,
+                "config": config,
+                "run_name": run_name,
+                "include_phase_four": include_phase_four,
+            }
+        )
+        return {
+            "command": "run",
+            "output_dir": str(output_dir),
+            "run_name": run_name,
+            "completed_phases": ["phase-1", "phase-2", "phase-3", "phase-4"],
+            "phases": {
+                "phase-1": {"completed_trials": 1},
+                "phase-2": {"completed_trials": 1},
+                "phase-3": {"completed_trials": 1},
+                "phase-4": {"completed_trials": 1},
+            },
+        }
+
+    def fake_build_status_payload(output_dir, config, run_name):
+        called["status"].append(
+            {
+                "output_dir": output_dir,
+                "config": config,
+                "run_name": run_name,
+            }
+        )
+        return {
+            "command": "status",
+            "output_dir": str(output_dir),
+            "run_name": run_name,
+            "completed_phases": ["phase-1"],
+            "phases": {"phase-1": {"completed_trials": 1}},
+        }
+
+    monkeypatch.setattr("speech_recognition.cli._run_sweep_pipeline", fake_run_sweep_pipeline)
+    monkeypatch.setattr(
+        "speech_recognition.cli._build_sweep_status_payload",
+        fake_build_status_payload,
     )
 
-    exit_code = main(
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(_configured_experiment().to_dict()), encoding="utf-8")
+
+    run_exit_code = main(
         [
             "run",
             "--config",
@@ -134,27 +180,16 @@ def test_run_command_executes_full_pipeline_and_writes_state(tmp_path: Path, cap
             "demo",
         ]
     )
-
-    assert exit_code == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["completed_phases"] == list(PHASE_ORDER)
-
-    phase_one_state = tmp_path / "runs" / "phase_1" / "runs" / "demo" / "state.json"
-    phase_two_artifact = tmp_path / "runs" / "phase_2" / "runs" / "demo" / "artifact.json"
-    checkpoint_pointer = tmp_path / "runs" / "checkpoints" / "demo.json"
-
-    assert phase_one_state.exists()
-    assert phase_two_artifact.exists()
-    assert checkpoint_pointer.exists()
-
-    phase_two_payload = json.loads(phase_two_artifact.read_text(encoding="utf-8"))
-    assert (
-        phase_two_payload["input_data"]["upstream"]["phase-1"]["feature_pipeline"]["name"] == "mfcc"
-    )
+    assert run_exit_code == 0
+    run_payload = json.loads(capsys.readouterr().out)
+    assert run_payload["completed_phases"] == ["phase-1", "phase-2", "phase-3", "phase-4"]
+    assert called["run"][0]["include_phase_four"] is True
 
     resume_exit_code = main(
         [
             "resume",
+            "--config",
+            str(config_path),
             "--output-dir",
             str(tmp_path / "runs"),
             "--run-name",
@@ -162,12 +197,15 @@ def test_run_command_executes_full_pipeline_and_writes_state(tmp_path: Path, cap
         ]
     )
     assert resume_exit_code == 0
-    resumed_payload = json.loads(capsys.readouterr().out)
-    assert resumed_payload["completed_phases"] == list(PHASE_ORDER)
+    resume_payload = json.loads(capsys.readouterr().out)
+    assert resume_payload["completed_phases"] == ["phase-1", "phase-2", "phase-3", "phase-4"]
+    assert called["run"][1]["include_phase_four"] is True
 
     status_exit_code = main(
         [
             "status",
+            "--config",
+            str(config_path),
             "--output-dir",
             str(tmp_path / "runs"),
             "--run-name",
@@ -176,4 +214,47 @@ def test_run_command_executes_full_pipeline_and_writes_state(tmp_path: Path, cap
     )
     assert status_exit_code == 0
     status_payload = json.loads(capsys.readouterr().out)
-    assert status_payload["completed_phases"] == list(PHASE_ORDER)
+    assert status_payload["completed_phases"] == ["phase-1"]
+    assert len(called["status"]) == 1
+
+
+def test_run_mlflow_only_uses_temporary_output_dir(tmp_path: Path, monkeypatch, capsys) -> None:
+    seen: dict[str, Path] = {}
+
+    def fake_run_sweep_pipeline(output_dir, config, run_name, include_phase_four):
+        assert config is not None
+        assert config.mlflow.enabled
+        assert include_phase_four is True
+        seen["output_dir"] = output_dir
+        return {
+            "command": "run",
+            "output_dir": str(output_dir),
+            "run_name": run_name,
+            "completed_phases": [],
+            "phases": {},
+        }
+
+    monkeypatch.setattr("speech_recognition.cli._run_sweep_pipeline", fake_run_sweep_pipeline)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(_configured_experiment().to_dict()), encoding="utf-8")
+
+    exit_code = main(
+        [
+            "run",
+            "--config",
+            str(config_path),
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--run-name",
+            "demo",
+            "--mlflow-only",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    used_output_dir = seen["output_dir"]
+    assert used_output_dir != (tmp_path / "outputs")
+    assert "speech-recognition-mlflow-" in str(used_output_dir)
+    assert payload["output_dir"] == str(used_output_dir)

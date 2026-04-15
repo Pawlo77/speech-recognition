@@ -1,7 +1,6 @@
 """Training strategy execution helpers for runtime orchestration."""
 
 import contextlib
-import json
 from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
@@ -41,8 +40,20 @@ from .shared import (
 
 def _should_persist_predictions(config: ExperimentConfig, evaluation_split: str) -> bool:
     """Return whether prediction artifacts should be persisted for this run."""
-
     return config.phase.phase == "phase_4" or evaluation_split == config.dataset.test_split
+
+
+def _log_prediction_artifact(
+    tracker: Any | None,
+    prediction_filename: str,
+    payload: dict[str, Any],
+) -> str | None:
+    """Log prediction payload as MLflow artifact when tracker supports it."""
+    if tracker is None or not hasattr(tracker, "log_named_json_artifact"):
+        return None
+    artifact_name = f"predictions/{prediction_filename}"
+    tracker.log_named_json_artifact(artifact_name, payload)
+    return artifact_name
 
 
 def _compose_two_stage_probs(
@@ -51,7 +62,6 @@ def _compose_two_stage_probs(
     non_command_probs: list[list[float]],
 ) -> list[list[float]]:
     """Compose 12-class probabilities from gate/command/non-command heads."""
-
     gate = np.array(gate_probs, dtype=np.float32)
     command = np.array(command_probs, dtype=np.float32)
     non_command = np.array(non_command_probs, dtype=np.float32)
@@ -68,7 +78,6 @@ def _predict_logits(
     warmup_iterations: int = 0,
 ) -> tuple[list[int], list[list[float]], float]:
     """Predict raw logits and latency for a loader."""
-
     model.eval()
     targets: list[int] = []
     logits_payload: list[list[float]] = []
@@ -108,11 +117,9 @@ def _execute_two_stage(
     output_dir: Path,
     run_name: str,
     evaluation_split: str,
-    *,
     warmup_iterations: int,
 ) -> dict[str, Any]:
     """Train and evaluate a true two-stage detector pipeline."""
-
     tracker = _start_run_tracker(config, run_name)
     try:
         _set_reproducibility(config.seed, config.training.deterministic)
@@ -313,7 +320,6 @@ def _execute_two_stage(
             gate_loader: FeatureBatchLoader,
             cmd_loader: FeatureBatchLoader,
             nc_loader: FeatureBatchLoader,
-            *,
             warmup: int,
         ) -> tuple[list[int], list[list[float]], float]:
             _, gate_probs, latency_ms = _predict(
@@ -381,21 +387,16 @@ def _execute_two_stage(
                 if evaluation_split == config.dataset.test_split
                 else "validation_predictions.json"
             )
-            predictions_path = run_dir / prediction_filename
-            predictions_path.write_text(
-                json.dumps(
-                    {
-                        "targets": eval_targets,
-                        "probs": eval_probs,
-                        "labels": list(ALL_LABELS),
-                        "strategy": config.evaluation.strategy,
-                    },
-                    indent=2,
-                    sort_keys=True,
-                ),
-                encoding="utf-8",
+            prediction_artifact = _log_prediction_artifact(
+                tracker,
+                prediction_filename,
+                {
+                    "targets": eval_targets,
+                    "probs": eval_probs,
+                    "labels": list(ALL_LABELS),
+                    "strategy": config.evaluation.strategy,
+                },
             )
-            prediction_artifact = str(predictions_path)
 
         result = {
             "epoch": int(gate_fit.get("epoch", config.training.epochs)),
@@ -418,11 +419,9 @@ def _execute_shared_two_head(
     output_dir: Path,
     run_name: str,
     evaluation_split: str,
-    *,
     warmup_iterations: int,
 ) -> dict[str, Any]:
     """Train and evaluate a shared-backbone two-head pipeline."""
-
     tracker = _start_run_tracker(config, run_name)
     try:
         _set_reproducibility(config.seed, config.training.deterministic)
@@ -499,9 +498,9 @@ def _execute_shared_two_head(
 
         def _combined_head_probs(
             loader: FeatureBatchLoader,
-            *,
             warmup: int,
         ) -> tuple[list[int], list[list[float]], float]:
+            """Predict combined head probabilities and latency for a loader."""
             targets, logits_payload, latency_ms = _predict_logits(
                 model,
                 loader,
@@ -544,21 +543,16 @@ def _execute_shared_two_head(
                 if evaluation_split == config.dataset.test_split
                 else "validation_predictions.json"
             )
-            predictions_path = run_dir / prediction_filename
-            predictions_path.write_text(
-                json.dumps(
-                    {
-                        "targets": eval_targets,
-                        "probs": eval_probs,
-                        "labels": list(ALL_LABELS),
-                        "strategy": config.evaluation.strategy,
-                    },
-                    indent=2,
-                    sort_keys=True,
-                ),
-                encoding="utf-8",
+            prediction_artifact = _log_prediction_artifact(
+                tracker,
+                prediction_filename,
+                {
+                    "targets": eval_targets,
+                    "probs": eval_probs,
+                    "labels": list(ALL_LABELS),
+                    "strategy": config.evaluation.strategy,
+                },
             )
-            prediction_artifact = str(predictions_path)
 
         result = {
             "epoch": int(fit_payload.get("epoch", config.training.epochs)),
@@ -581,6 +575,8 @@ def execute_single_train(
     output_dir: Path,
     run_name: str,
 ) -> dict[str, Any]:
+    """Execute the single-model training strategy
+    for the given config and return evaluation results."""
     if config.evaluation.strategy == "two_stage_detector":
         payload = _execute_two_stage(
             config,
@@ -695,21 +691,16 @@ def execute_single_train(
 
         prediction_artifact: str | None = None
         if _should_persist_predictions(config, config.dataset.valid_split):
-            predictions_path = run_dir / "validation_predictions.json"
-            predictions_path.write_text(
-                json.dumps(
-                    {
-                        "targets": val_targets,
-                        "probs": val_probs,
-                        "labels": list(ALL_LABELS),
-                        "strategy": config.evaluation.strategy,
-                    },
-                    indent=2,
-                    sort_keys=True,
-                ),
-                encoding="utf-8",
+            prediction_artifact = _log_prediction_artifact(
+                tracker,
+                "validation_predictions.json",
+                {
+                    "targets": val_targets,
+                    "probs": val_probs,
+                    "labels": list(ALL_LABELS),
+                    "strategy": config.evaluation.strategy,
+                },
             )
-            prediction_artifact = str(predictions_path)
 
         result = {
             "epoch": fit_payload.get("epoch", config.training.epochs),

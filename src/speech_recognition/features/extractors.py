@@ -14,7 +14,6 @@ from ..config import FeaturePipelineConfig
 
 DEFAULT_SAMPLE_RATE: Final[int] = 16000
 """Default audio sample rate used by waveform loading and feature transforms."""
-
 DEFAULT_TARGET_SECONDS: Final[float] = 1.0
 """Default clip duration used for padding/trimming waveforms."""
 
@@ -30,7 +29,6 @@ class DynamicWaveformPad(nn.Module):
 
     def forward(self, waveform: Tensor) -> Tensor:
         """Return mono waveforms with shape [B, 1, target_num_samples]."""
-
         if waveform.dim() == 1:
             waveform = waveform.unsqueeze(0).unsqueeze(0)
         elif waveform.dim() == 2:
@@ -69,7 +67,6 @@ class WaveformLoader(nn.Module):
 
     def _load_one(self, path: str | Path, device: torch.device | str | None = None) -> Tensor:
         """Load one file, resample to configured rate, and normalize duration."""
-
         try:
             waveform, original_sample_rate = torchaudio.load(str(path))
         except ImportError as err:
@@ -103,7 +100,6 @@ class WaveformLoader(nn.Module):
         self, paths: Sequence[str | Path], device: torch.device | str | None = None
     ) -> Tensor:
         """Load many audio files and stack them as a batch tensor."""
-
         if not paths:
             raise ValueError("paths must not be empty.")
         waveforms = [self._load_one(path, device=device) for path in paths]
@@ -133,7 +129,6 @@ class MelSpectrogramFeatures(nn.Module):
 
     def forward(self, waveform: Tensor) -> Tensor:
         """Compute log-mel features with output shape [B, n_mels, frames]."""
-
         mel = self.mel(waveform)
         mel = self.to_db(mel)
         return mel.squeeze(1)
@@ -177,7 +172,6 @@ class MFCCFeatures(nn.Module):
 
     def forward(self, waveform: Tensor) -> Tensor:
         """Compute MFCC features with output shape [B, n_mfcc, frames]."""
-
         return self.mfcc(waveform).squeeze(1)
 
 
@@ -213,7 +207,6 @@ class PCENFeatures(nn.Module):
 
     def _pcen(self, mel: Tensor) -> Tensor:
         """Apply differentiable PCEN normalization over the time axis."""
-
         smoothed = torch.empty_like(mel)
         smoothed[:, :, 0] = mel[:, :, 0]
         for time_index in range(1, mel.size(-1)):
@@ -226,7 +219,6 @@ class PCENFeatures(nn.Module):
 
     def forward(self, waveform: Tensor) -> Tensor:
         """Compute PCEN-normalized mel features."""
-
         mel = self.mel(waveform).squeeze(1)
         return self._pcen(mel)
 
@@ -265,7 +257,6 @@ class MelSpecAugmentFeatures(nn.Module):
 
     def forward(self, waveform: Tensor) -> Tensor:
         """Compute mel features and apply SpecAugment masks."""
-
         mel = self.mel(waveform)
         return self.augment(mel)
 
@@ -280,7 +271,6 @@ class FeaturePipeline(nn.Module):
 
     def forward(self, waveform: Tensor) -> Tensor:
         """Pad/trim waveform input and run the configured extractor."""
-
         waveform = self.padder(waveform)
         return self.extractor(waveform)
 
@@ -292,7 +282,6 @@ def build_feature_extractor(
     device: torch.device | str | None = None,
 ) -> nn.Module:
     """Build a feature extractor module from feature config."""
-
     if seed is not None:
         torch.manual_seed(seed)
 
@@ -344,7 +333,6 @@ def build_feature_pipeline(
     device: torch.device | str | None = None,
 ) -> FeaturePipeline:
     """Build the full waveform-to-feature pipeline from config."""
-
     padder = DynamicWaveformPad(target_num_samples=round(target_seconds * sample_rate))
     extractor = build_feature_extractor(
         config=config,

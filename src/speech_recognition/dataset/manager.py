@@ -25,55 +25,38 @@ class SpeechCommandsDataset(_SpeechCommandsSplitMixin, UnknownSampleGenerationMi
 
     KAGGLE_SLUG: Final[str] = "tensorflow-speech-recognition-challenge"
     """Kaggle competition slug."""
-
     EXPECTED_MAIN_DIR: Final[str] = "train/audio"
     """Required relative directory for availability check."""
-
     VAL_LIST_FILE: Final[str] = "train/split_lists/validation_list.txt"
     """Relative path to official validation split list."""
-
     TEST_LIST_FILE: Final[str] = "train/split_lists/testing_list.txt"
     """Relative path to official testing split list."""
-
     TRAIN_LIST_FILE: Final[str] = "train/split_lists/training_list.txt"
     """Relative path to generated training split list."""
-
     SMALL_VAL_LIST_FILE: Final[str] = "train/split_lists/small_validation_list.txt"
     """Relative path to generated validation split list for smaller dataset mode."""
-
     SMALL_TEST_LIST_FILE: Final[str] = "train/split_lists/small_testing_list.txt"
     """Relative path to generated testing split list for smaller dataset mode."""
-
     SMALL_TRAIN_LIST_FILE: Final[str] = "train/split_lists/small_training_list.txt"
     """Relative path to generated training split list for smaller dataset mode."""
-
     EXTENDED_TRAIN_LIST_FILE: Final[str] = "train/split_lists/extended_training_list.txt"
     """Relative path to generated training split list for extended dataset mode."""
-
     EXTENDED_VAL_LIST_FILE: Final[str] = "train/split_lists/extended_validation_list.txt"
     """Relative path to generated validation split list for extended dataset mode."""
-
     EXTENDED_TEST_LIST_FILE: Final[str] = "train/split_lists/extended_testing_list.txt"
     """Relative path to generated testing split list for extended dataset mode."""
-
     TRAIN_LABELS_CSV: Final[str] = "train.csv"
     """Relative path to optional filename-label mapping CSV."""
-
     TEST_AUDIO_DIR: Final[str] = "test/audio"
     """Relative path to competition test audio."""
-
     UNKNOWN_LABEL: Final[str] = "__unknown__"
     """Fallback label for unlabeled test items."""
-
     BACKGROUND_NOISE_LABEL: Final[str] = "_background_noise_"
     """Label name for background noise directory."""
-
     SILENCE_LABEL: Final[str] = "__silence__"
     """Canonical silence label used by training/evaluation code."""
-
     PADDED_AUDIO_DIR: Final[str] = "__padded_1sec__"
     """Internal directory used for generated padded clips."""
-
     TARGET_COMMAND_LABELS: Final[tuple[str, ...]] = (
         "yes",
         "no",
@@ -87,16 +70,19 @@ class SpeechCommandsDataset(_SpeechCommandsSplitMixin, UnknownSampleGenerationMi
         "go",
     )
     """Command labels kept as dedicated classes in the 12-class setup."""
-
     UNKNOWN_ORIGIN_CSV: Final[str] = "train/split_lists/unknown_origin_labels.csv"
     """CSV mapping merged unknown samples back to their original labels."""
-
     SMALL_TRAIN_PER_CLASS: Final[int] = 1000
+    """Number of samples per class in the smaller dataset mode (before 1-second filtering)."""
     SMALL_VAL_PER_CLASS: Final[int] = 250
+    """Number of samples per class in the smaller dataset mode (before 1-second filtering)."""
     SMALL_TEST_PER_CLASS: Final[int] = 250
+    """Number of samples per class in the smaller dataset mode (before 1-second filtering)."""
     MAX_EXTENDED_UNKNOWN_PER_SPLIT: Final[int] = 20000
-
+    """Maximum number of unknown samples per split in the extended dataset
+    mode (after 1-second filtering)."""
     SMALLER_DATASET_LABELS: Final[set[str]] = set(TARGET_COMMAND_LABELS)
+    """Labels included in the smaller dataset mode."""
 
     def __init__(
         self,
@@ -253,7 +239,6 @@ class SpeechCommandsDataset(_SpeechCommandsSplitMixin, UnknownSampleGenerationMi
 
     def _duration_in_frames(self, sample: Sample) -> int | None:
         """Return number of audio frames for a sample, or None on read failure."""
-
         try:
             with wave.open(str(sample.path), "rb") as wav_file:
                 return wav_file.getnframes()
@@ -263,13 +248,11 @@ class SpeechCommandsDataset(_SpeechCommandsSplitMixin, UnknownSampleGenerationMi
 
     def _is_shorter_than_1sec(self, sample: Sample) -> bool:
         """Check whether a sample is shorter than one second at 16 kHz."""
-
         frame_count = self._duration_in_frames(sample)
         return frame_count is not None and frame_count < 16000
 
     def _pad_sample_to_1sec(self, sample: Sample) -> Sample:
         """Create (or reuse) a zero-padded 1-second copy for short clips."""
-
         train_audio_dir = self.dataset_root / "train" / "audio"
         rel_path = sample.path.relative_to(train_audio_dir)
         padded_dir = train_audio_dir / "__padded_1sec__" / rel_path.parent
@@ -310,7 +293,6 @@ class SpeechCommandsDataset(_SpeechCommandsSplitMixin, UnknownSampleGenerationMi
 
     def _canonicalize_label(self, label: str) -> str:
         """Map raw dataset labels into the 12-class taxonomy."""
-
         if label == self.BACKGROUND_NOISE_LABEL:
             return self.SILENCE_LABEL
         if label in self.TARGET_COMMAND_LABELS:
@@ -373,7 +355,6 @@ class SpeechCommandsDataset(_SpeechCommandsSplitMixin, UnknownSampleGenerationMi
 
         Original long files are moved to a separate directory.
         """
-
         logger.info(
             "Splitting background noise samples into 1-second segments and "
             "moving originals to a separate directory."
@@ -512,7 +493,6 @@ class SpeechCommandsDataset(_SpeechCommandsSplitMixin, UnknownSampleGenerationMi
         samples: list[Sample],
     ) -> tuple[list[Sample], list[Sample], list[Sample]]:
         """Split samples per label to preserve class distribution across splits."""
-
         grouped: dict[str, list[Sample]] = {}
         for sample in samples:
             grouped.setdefault(sample.label, []).append(sample)

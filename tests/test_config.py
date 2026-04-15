@@ -66,6 +66,7 @@ def test_experiment_config_round_trip_serializes_to_json() -> None:
             ensemble_members=("backbone_a", "backbone_b"),
         ),
         training=TrainingControlConfig(epochs=60, use_mixed_precision=True),
+        scheduler=SchedulerConfig(total_epochs=60),
         phase=PhaseSelectionConfig(phase="phase_3"),
         checkpointing=CheckpointConfig(keep_last_n=3),
     )

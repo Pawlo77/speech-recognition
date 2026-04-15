@@ -189,8 +189,8 @@ def test_phase_four_sweep_skips_completed_trials_and_applies_strict_gate(
 
     calls: list[list[str]] = []
 
-    def fake_run(command, *, check, env, text, capture_output):
-        _ = check, env, text, capture_output
+    def fake_run(command, env, check):
+        _ = env, check
         calls.append(list(command))
         run_name = command[command.index("--run-name") + 1]
         trial_name = run_name.removesuffix("_heldout_test")
@@ -235,10 +235,14 @@ def test_phase_four_sweep_skips_completed_trials_and_applies_strict_gate(
 
         class _CompletedProcess:
             returncode = 0
+            stdout = ""
 
         return _CompletedProcess()
 
-    monkeypatch.setattr("speech_recognition.orchestration.phase_four.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "speech_recognition.orchestration.phase_four.run_subprocess_with_live_output",
+        fake_run,
+    )
 
     payload = runner.execute()
 

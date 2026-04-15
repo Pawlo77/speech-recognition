@@ -20,7 +20,7 @@ The implementation follows this four-phase execution plan (methodological detail
 3. Phase 3: architecture comparison across AST, ConvNeXt, SSAMBA, xLSTM, and MLP-Mixer.
 4. Phase 4: non-command handling and final held-out test evaluation.
 
-The orchestration layer is intentionally isolated from the training loop. Each sweep trial is executed in a child Python process so that PyTorch and MPS memory are reclaimed by the operating system after every run. State is persisted as JSON under `outputs/phase_{1..4}/runs/`, and rerunning a phase resumes from the next uncompleted trial without redoing completed work.
+The orchestration layer is intentionally isolated from the training loop. Each sweep trial is executed in a child Python process so that PyTorch and MPS memory are reclaimed by the operating system after every run. By default, phase targets persist state as JSON under `outputs/phase_{1..4}/runs/`. The full pipeline target runs with `--mlflow-only`, which uses a temporary local run directory and keeps durable artifacts in MLflow.
 
 The repository Makefile exports the child-process environment globally:
 
@@ -80,7 +80,7 @@ The experiment funnel is designed for idempotent reruns.
 - Phase 3 sweeps 90 architecture/seed combinations.
 - Phase 4 evaluates 45 held-out configurations derived from the top three Phase 3 backbones across three fixed seeds.
 
-Every phase persists a local state file and a best-selection artifact before the next trial begins. If a subprocess crashes or the machine reboots, rerunning the same Makefile target resumes from the most recent valid state file in the same `--output-dir` and `--run-name` namespace.
+Every phase target persists a local state file and a best-selection artifact before the next trial begins. If a subprocess crashes or the machine reboots, rerunning the same phase target resumes from the most recent valid state file in the same `--output-dir` and `--run-name` namespace.
 
 Phase 4 winner selection is seed-aggregated by method/backbone configuration, then ranked by mean non-command macro-F1 with leakage and false-trigger tie-breakers.
 

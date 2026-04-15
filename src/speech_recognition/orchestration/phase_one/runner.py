@@ -5,62 +5,54 @@ import logging
 import subprocess
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
 from tqdm.auto import tqdm
 
-from ..config import ExperimentConfig, FeaturePipelineConfig
-from .services import build_isolated_subprocess_env
-from .sweep_utils import (
+from ...config import ExperimentConfig
+from ..services import build_isolated_subprocess_env
+from ..sweep_utils import (
     apply_trial_cap,
     iter_nested_payloads,
+    run_subprocess_with_live_output,
     summary_from_completed_process,
-    sweep_seeds,
     utc_now,
 )
-
-PHASE_ONE_FEATURES: tuple[str, ...] = (
-    "mel_spectrogram",
-    "high_temporal_mel",
-    "mfcc",
-    "pcen",
-    "mel_specaugment",
-)
-"""Feature families included in the phase-1 sweep."""
-
-PHASE_ONE_PROXY_MODELS: tuple[str, ...] = ("convnext", "xlstm")
-"""Proxy model families included in the phase-1 sweep."""
-
-PHASE_ONE_SEEDS: tuple[int, int, int] = (0, 42, 2003)
-"""Fixed seeds used for the phase-1 sweep grid."""
-
-PHASE_ONE_STATE_SCHEMA_VERSION: int = 1
-"""Schema version for the phase-1 sweep state file."""
+from .constants import PHASE_ONE_STATE_SCHEMA_VERSION
+from .state import PhaseOneSweepState
+from .trials import PhaseOneTrialRecord, PhaseOneTrialSpec, build_phase_one_trials
 
 
-def _apply_trial_cap(trials: tuple[Any, ...]) -> tuple[Any, ...]:
-    return apply_trial_cap(trials)
+def _phase_one_package() -> Any:
+    """Return the imported phase-one package for accessing trial builders and subprocess runners."""
+    return import_module("speech_recognition.orchestration.phase_one")
 
 
-def _sweep_seeds() -> tuple[int, ...]:
-    """Return default seeds or a single-seed override for smoke runs."""
+def _build_phase_one_trials() -> tuple[Any, ...]:
+    """Return the trial specifications for phase 1."""
+    package = _phase_one_package()
+    builder = getattr(package, "build_phase_one_trials", build_phase_one_trials)
+    return builder()
 
-    return sweep_seeds(PHASE_ONE_SEEDS)
+
+def _run_subprocess(command: list[str], env: Mapping[str, str], check: bool) -> Any:
+    """Run a subprocess command with live output and return the completed process."""
+    package = _phase_one_package()
+    runner = getattr(package, "run_subprocess_with_live_output", run_subprocess_with_live_output)
+    return runner(command, env=env, check=check)
 
 
-def _phase_one_group_key(record: "PhaseOneTrialRecord") -> tuple[str, str]:
+def _phase_one_group_key(record: PhaseOneTrialRecord) -> tuple[str, str]:
     """Return the grouping key that identifies one phase-1 configuration."""
-
     return record.feature_name, record.proxy_model
 
 
 def _select_phase_one_winner(
-    records: Mapping[str, "PhaseOneTrialRecord"],
+    records: Mapping[str, PhaseOneTrialRecord],
 ) -> tuple[str | None, float | None, dict[str, Any] | None]:
     """Select the phase-1 winner using mean macro-F1 over fixed seeds."""
-
     if not records:
         return None, None, None
 
@@ -100,30 +92,8 @@ def _select_phase_one_winner(
     return representative.trial_id, best_mean, aggregate
 
 
-def _utc_now() -> str:
-    return utc_now()
-
-
-def _serialize(value: Any) -> Any:
-    """Convert nested dataclasses and tuples into JSON-friendly values."""
-
-    if hasattr(value, "__dataclass_fields__"):
-        return {
-            field.name: _serialize(getattr(value, field.name))
-            for field in value.__dataclass_fields__.values()
-        }
-    if isinstance(value, tuple):
-        return [_serialize(item) for item in value]
-    if isinstance(value, list):
-        return [_serialize(item) for item in value]
-    if isinstance(value, Mapping):
-        return {str(key): _serialize(item) for key, item in value.items()}
-    return value
-
-
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
     """Write JSON atomically via a temporary file."""
-
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(f"{path.name}.tmp")
     temporary_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -132,29 +102,11 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
 
 def _read_json(path: Path) -> dict[str, Any]:
     """Load JSON from disk."""
-
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _feature_pipeline_for_trial(feature_name: str) -> FeaturePipelineConfig:
-    """Build the feature configuration for one trial."""
-
-    if feature_name == "mel_spectrogram":
-        return FeaturePipelineConfig(name="mel_spectrogram")
-    if feature_name == "high_temporal_mel":
-        return FeaturePipelineConfig(name="high_temporal_mel", n_fft=512, hop_length=80)
-    if feature_name == "mfcc":
-        return FeaturePipelineConfig(name="mfcc", n_mfcc=40)
-    if feature_name == "pcen":
-        return FeaturePipelineConfig(name="pcen", pcen_smoothing=0.1)
-    if feature_name == "mel_specaugment":
-        return FeaturePipelineConfig(name="mel_specaugment", specaugment=True)
-    raise ValueError(f"Unsupported phase-1 feature '{feature_name}'.")
 
 
 def _trial_score(payload: Mapping[str, Any]) -> float:
     """Extract the validation macro-F1 score from a child payload."""
-
     for nested_payload in iter_nested_payloads(payload):
         score = nested_payload.get("validation_macro_f1")
         if isinstance(score, int | float):
@@ -180,7 +132,6 @@ def _summary_from_completed_process(
 
 def build_phase_one_command(config_path: Path, run_name: str, output_dir: Path) -> list[str]:
     """Build the isolated subprocess command for one phase-1 trial."""
-
     return [
         sys.executable,
         "-m",
@@ -193,147 +144,6 @@ def build_phase_one_command(config_path: Path, run_name: str, output_dir: Path) 
         "--run-name",
         run_name,
     ]
-
-
-@dataclass(frozen=True, slots=True)
-class PhaseOneTrialSpec:
-    """Describe one trial in the phase-1 ablation grid."""
-
-    trial_id: str
-    """Unique trial identifier."""
-    feature_name: str
-    """Feature pipeline name for this trial."""
-    proxy_model: str
-    """Proxy model family for this trial."""
-    seed: int
-    """Random seed for this trial."""
-
-    def to_config(self, base_config: ExperimentConfig) -> ExperimentConfig:
-        """Return the concrete config for this trial."""
-
-        dataset = replace(
-            base_config.dataset,
-            train_split="train_small",
-            valid_split="valid_small",
-            test_split="test_small",
-        )
-        features = _feature_pipeline_for_trial(self.feature_name)
-        model = replace(base_config.model, family=self.proxy_model, pretrained=False)
-        phase_config = replace(base_config.phase, phase="phase_1")
-        return replace(
-            base_config,
-            dataset=dataset,
-            features=features,
-            model=model,
-            phase=phase_config,
-            seed=self.seed,
-        )
-
-
-def build_phase_one_trials() -> tuple[PhaseOneTrialSpec, ...]:
-    """Return the 30 trial specifications for phase 1."""
-
-    trials: list[PhaseOneTrialSpec] = []
-    trial_index = 0
-    for feature_name in PHASE_ONE_FEATURES:
-        for proxy_model in PHASE_ONE_PROXY_MODELS:
-            for seed in _sweep_seeds():
-                trial_index += 1
-                trials.append(
-                    PhaseOneTrialSpec(
-                        trial_id=f"trial_{trial_index:02d}_{feature_name}_{proxy_model}_seed_{seed}",
-                        feature_name=feature_name,
-                        proxy_model=proxy_model,
-                        seed=seed,
-                    )
-                )
-    return tuple(trials)
-
-
-@dataclass(frozen=True, slots=True)
-class PhaseOneTrialRecord:
-    """Persisted record for one completed phase-1 trial."""
-
-    trial_id: str
-    """Unique trial identifier."""
-    feature_name: str
-    """Feature pipeline name for this trial."""
-    proxy_model: str
-    """Proxy model family used in this trial."""
-    seed: int
-    """Random seed used in this trial."""
-    run_name: str
-    """Child pipeline run name."""
-    config_path: str
-    """Path to the trial's experiment config file."""
-    child_state_path: str
-    """Path to the child run's state file."""
-    validation_macro_f1: float
-    """Validation macro-F1 score achieved."""
-    completed_at: str
-    """ISO-8601 timestamp when trial completed."""
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serializable representation of the record."""
-
-        return _serialize(self)
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "PhaseOneTrialRecord":
-        """Build a record from JSON data."""
-
-        payload = dict(data)
-        payload["seed"] = int(payload["seed"])
-        payload["validation_macro_f1"] = float(payload["validation_macro_f1"])
-        return cls(**payload)
-
-
-@dataclass(frozen=True, slots=True)
-class PhaseOneSweepState:
-    """Persistent state for the phase-1 sweep."""
-
-    schema_version: int = PHASE_ONE_STATE_SCHEMA_VERSION
-    """State file schema version."""
-    output_dir: str = ""
-    """Root output directory for the sweep."""
-    completed_trials: dict[str, PhaseOneTrialRecord] = field(default_factory=dict)
-    """Mapping of trial ID to completed trial records."""
-    best_trial_id: str | None = None
-    """Trial ID of the best-performing trial."""
-    best_validation_macro_f1: float | None = None
-    """Best validation macro-F1 score achieved."""
-    created_at: str = field(default_factory=_utc_now)
-    """ISO-8601 timestamp when sweep state was created."""
-    updated_at: str = field(default_factory=_utc_now)
-    """ISO-8601 timestamp when sweep state was last updated."""
-
-    def __post_init__(self) -> None:
-        if self.schema_version != PHASE_ONE_STATE_SCHEMA_VERSION:
-            raise ValueError("Unsupported phase-1 state schema version.")
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serializable representation of the sweep state."""
-
-        return _serialize(self)
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "PhaseOneSweepState":
-        """Build phase-1 state from JSON."""
-
-        payload = dict(data)
-        payload["completed_trials"] = {
-            key: PhaseOneTrialRecord.from_dict(value)
-            for key, value in payload.get("completed_trials", {}).items()
-        }
-        if payload.get("best_validation_macro_f1") is not None:
-            payload["best_validation_macro_f1"] = float(payload["best_validation_macro_f1"])
-        return cls(**payload)
-
-    @classmethod
-    def fresh(cls, output_dir: Path) -> "PhaseOneSweepState":
-        """Create a new empty state for an output directory."""
-
-        return cls(output_dir=str(output_dir))
 
 
 class PhaseOneSweepRunner:
@@ -353,14 +163,12 @@ class PhaseOneSweepRunner:
 
     def load_state(self) -> PhaseOneSweepState:
         """Load the persisted sweep state or create a new one."""
-
         if not self.state_path.exists():
             return PhaseOneSweepState.fresh(self.output_dir)
         return PhaseOneSweepState.from_dict(_read_json(self.state_path))
 
     def _save_state(self, state: PhaseOneSweepState) -> None:
         """Persist the sweep state and best-feature summary."""
-
         _atomic_write_json(self.state_path, state.to_dict())
         if state.best_trial_id is not None:
             best_trial = state.completed_trials[state.best_trial_id]
@@ -376,12 +184,10 @@ class PhaseOneSweepRunner:
 
     def _trial_run_name(self, trial: PhaseOneTrialSpec) -> str:
         """Return the child run name for one trial."""
-
         return trial.trial_id
 
     def _trial_output_paths(self, trial: PhaseOneTrialSpec) -> tuple[Path, Path, Path]:
         """Return config, child state, and trial directory paths for one trial."""
-
         trial_dir = self.phase_dir / "runs" / trial.trial_id
         config_path = trial_dir / "temp_config.json"
         child_state_path = self.output_dir / "phase_1" / "runs" / trial.trial_id / "state.json"
@@ -389,12 +195,10 @@ class PhaseOneSweepRunner:
 
     def _build_trial_config(self, trial: PhaseOneTrialSpec) -> ExperimentConfig:
         """Build the concrete experiment config for a trial."""
-
         return trial.to_config(self.base_config)
 
     def _run_trial(self, trial: PhaseOneTrialSpec) -> PhaseOneTrialRecord:
         """Execute one trial in an isolated child process and return its record."""
-
         trial_dir, config_path, child_state_path = self._trial_output_paths(trial)
         trial_dir.mkdir(parents=True, exist_ok=True)
 
@@ -404,12 +208,10 @@ class PhaseOneSweepRunner:
         )
 
         command = build_phase_one_command(config_path, self._trial_run_name(trial), self.output_dir)
-        completed_process = subprocess.run(  # noqa: S603
+        completed_process = _run_subprocess(
             command,
-            check=True,
             env=build_isolated_subprocess_env(),
-            text=True,
-            capture_output=True,
+            check=True,
         )
 
         summary = _summary_from_completed_process(child_state_path, completed_process)
@@ -423,13 +225,12 @@ class PhaseOneSweepRunner:
             config_path=str(config_path),
             child_state_path=str(child_state_path),
             validation_macro_f1=validation_macro_f1,
-            completed_at=_utc_now(),
+            completed_at=utc_now(),
         )
 
     def execute(self) -> dict[str, Any]:
         """Run the full phase-1 sweep, skipping completed trials."""
-
-        trials = _apply_trial_cap(build_phase_one_trials())
+        trials = apply_trial_cap(_build_phase_one_trials())
         total_trials = len(trials)
         logger = logging.getLogger(__name__)
         state = self.load_state()
@@ -469,7 +270,7 @@ class PhaseOneSweepRunner:
                 best_trial_id=best_trial_id,
                 best_validation_macro_f1=best_score,
                 created_at=state.created_at,
-                updated_at=_utc_now(),
+                updated_at=utc_now(),
             )
 
             self._save_state(state)
@@ -483,7 +284,7 @@ class PhaseOneSweepRunner:
                 best_trial_id=best_trial_id,
                 best_validation_macro_f1=best_score,
                 created_at=state.created_at,
-                updated_at=_utc_now(),
+                updated_at=utc_now(),
             )
             self._save_state(state)
 

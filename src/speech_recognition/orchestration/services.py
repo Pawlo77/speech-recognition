@@ -26,7 +26,6 @@ def build_isolated_subprocess_command(
     run_name: str,
 ) -> list[str]:
     """Build a child-process CLI command for isolated phase execution."""
-
     if command not in {"run-single-train", "run-single-eval"}:
         raise ValueError(f"Unsupported isolated command '{command}'.")
 
@@ -46,9 +45,9 @@ def build_isolated_subprocess_command(
 
 def build_isolated_subprocess_env(base_env: Mapping[str, str] | None = None) -> dict[str, str]:
     """Build environment variables for isolated child-process execution."""
-
     env = dict(base_env or os.environ)
     env.update(ISOLATED_CHILD_ENV)
+    env.setdefault("PYTHONUNBUFFERED", "1")
     return env
 
 
@@ -57,11 +56,9 @@ def run_isolated_subprocess(
     config_path: Path,
     output_dir: Path,
     run_name: str,
-    *,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Run a child process using the isolated CLI invocation contract."""
-
     invocation = build_isolated_subprocess_command(
         command=command,
         config_path=config_path,
@@ -94,7 +91,6 @@ class PipelineContext:
     @property
     def upstream_artifacts(self) -> Mapping[str, PhaseArtifact]:
         """Return completed phase artifacts keyed by phase name."""
-
         return self.state.phase_artifacts
 
 
@@ -109,12 +105,10 @@ class PhaseService:
 
     def execute(self, context: PipelineContext) -> dict[str, Any]:
         """Execute the phase and return a JSON-serializable payload."""
-
         raise NotImplementedError
 
     def _upstream_payload(self, context: PipelineContext) -> dict[str, Any]:
         """Return upstream phase outputs for downstream consumption."""
-
         return {
             name: artifact.output_data
             for name, artifact in context.upstream_artifacts.items()

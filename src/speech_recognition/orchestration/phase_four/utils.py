@@ -10,7 +10,6 @@ from ..sweep_utils import iter_nested_payloads
 
 def _phase_four_score(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Extract phase-4 metrics from a child payload."""
-
     if not isinstance(payload, Mapping):
         return {
             "core_command_macro_f1": 0.0,
@@ -65,7 +64,6 @@ def _phase_four_score(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 def _phase_four_score_recursive(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Extract phase-4 metrics from nested child payload structures."""
-
     for nested_payload in iter_nested_payloads(payload):
         metrics = _phase_four_score(nested_payload)
         if metrics["core_command_macro_f1"] > 0.0 or metrics["macro_f1_nc"] > 0.0:
@@ -75,7 +73,6 @@ def _phase_four_score_recursive(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 def _phase_four_prediction_artifact_recursive(payload: Mapping[str, Any]) -> str | None:
     """Extract prediction artifact path from nested child payload structures."""
-
     for nested_payload in iter_nested_payloads(payload):
         direct_path = nested_payload.get("prediction_artifact")
         if isinstance(direct_path, str) and direct_path:
@@ -85,7 +82,6 @@ def _phase_four_prediction_artifact_recursive(payload: Mapping[str, Any]) -> str
 
 def _build_backbone_model_config(backbone_trial: PhaseThreeTrialRecord) -> ModelConfig:
     """Build a model config representative of one frozen phase-3 backbone."""
-
     family = backbone_trial.family
     params = backbone_trial.architecture_params
     if family == "ast":
@@ -139,7 +135,6 @@ def _build_backbone_model_config(backbone_trial: PhaseThreeTrialRecord) -> Model
 
 def _phase_four_optimizer_config(optim_artifact: Mapping[str, Any]) -> dict[str, Any]:
     """Extract the phase-2 winning optimizer payload for phase-4 reuse."""
-
     trial = optim_artifact.get("trial")
     if not isinstance(trial, Mapping):
         raise ValueError("Phase-2 best optimization artifact is missing the trial payload.")

@@ -21,7 +21,6 @@ from ...config import ExperimentConfig
 from ...dataset.unknown import UnknownSampleGenerationMixin
 from ...features.extractors import WaveformLoader
 from ...training import TrainingEngine
-from ..performance import execute_with_profile
 
 COMMAND_LABELS: tuple[str, ...] = (
     "yes",
@@ -36,21 +35,23 @@ COMMAND_LABELS: tuple[str, ...] = (
     "go",
 )
 """10 command labels used in the 12-class formulation."""
-
 NON_COMMAND_LABELS: tuple[str, str] = ("__unknown__", "__silence__")
 """Special non-command labels for unknown and silence classes."""
-
 ALL_LABELS: tuple[str, ...] = (*COMMAND_LABELS, *NON_COMMAND_LABELS)
 """All 12 labels (10 commands + unknown + silence)."""
-
 GATE_COMMAND_LABEL: str = "__command__"
+"""Virtual label representing the union of all command classes
+for two-stage detection strategies."""
 GATE_NON_COMMAND_LABEL: str = "__non_command__"
+"""Virtual label representing the union of all non-command classes
+for two-stage detection strategies."""
 
 
 class _RuntimeUnknownBlender(UnknownSampleGenerationMixin):
     """Runtime adapter for reusing dataset unknown-sample blending logic."""
 
     UNKNOWN_LABEL = "__unknown__"
+    """Label used for blended unknown samples."""
 
     def __init__(self, dataset_root: Path, seed: int, target_unknown_count: int) -> None:
         self.dataset_root = dataset_root
@@ -125,6 +126,8 @@ def _normalize_label(label: str) -> str:
 
 
 def _load_split_records(dataset_root: Path, split_name: str) -> list[AudioRecord]:
+    """Load audio records for a given split from the dataset,
+    normalizing labels and filtering missing files."""
     split_file = dataset_root / "train" / "split_lists" / _split_filename(split_name)
     if not split_file.exists():
         return []
@@ -157,7 +160,6 @@ class FeatureBatchLoader:
         self,
         records: list[AudioRecord],
         label_to_idx: dict[str, int],
-        *,
         batch_size: int,
         seed: int,
         waveform_loader: WaveformLoader,
@@ -283,6 +285,8 @@ class FeatureBatchLoader:
 
 
 def _macro_f1(targets: list[int], preds: list[int], labels: list[int]) -> float:
+    """Compute macro-averaged F1 score for the given targets and predictions,
+    considering only specified labels."""
     if not labels:
         return 0.0
 
@@ -317,6 +321,8 @@ def _per_class_metrics(
     preds: list[int],
     label_names: tuple[str, ...],
 ) -> dict[str, Any]:
+    """Compute precision, recall, and F1 score for each class based
+    on the given targets and predictions."""
     label_count = len(label_names)
     tp = [0] * label_count
     fp = [0] * label_count
@@ -343,6 +349,8 @@ def _per_class_metrics(
 
 
 def _priors(config: ExperimentConfig) -> dict[str, float]:
+    """Build class priors dictionary from experiment config
+    for reweighting and sampling strategies."""
     priors = dict.fromkeys(COMMAND_LABELS, config.evaluation.command_prior)
     priors["__unknown__"] = config.evaluation.unknown_prior
     priors["__silence__"] = config.evaluation.silence_prior
@@ -350,6 +358,8 @@ def _priors(config: ExperimentConfig) -> dict[str, float]:
 
 
 def _sampling_weights(records: list[AudioRecord], config: ExperimentConfig) -> list[float]:
+    """Build per-sample weights for weighted sampling strategies
+    based on class priors and sample counts."""
     priors = _priors(config)
     counts: dict[str, int] = dict.fromkeys(ALL_LABELS, 0)
     for record in records:
@@ -363,7 +373,6 @@ def _sampling_weights(records: list[AudioRecord], config: ExperimentConfig) -> l
 
 def _phase_four_silence_boost(counts: dict[str, int]) -> float:
     """Compute silence boost so silence approaches mean command support."""
-
     command_counts = [counts[label] for label in COMMAND_LABELS]
     if not command_counts:
         return 1.0
@@ -374,7 +383,6 @@ def _phase_four_silence_boost(counts: dict[str, int]) -> float:
 
 def _phase_four_weighted_sampling(records: list[AudioRecord]) -> list[float]:
     """Build per-sample train weights with explicit silence up-weighting."""
-
     counts: dict[str, int] = dict.fromkeys(ALL_LABELS, 0)
     for record in records:
         counts[record.label] += 1
@@ -395,7 +403,6 @@ def _augment_unknown_records_for_phase_four(
     seed: int,
 ) -> list[AudioRecord]:
     """Augment unknown samples using blending when unknown support is too low."""
-
     counts: dict[str, int] = dict.fromkeys(ALL_LABELS, 0)
     for record in records:
         counts[record.label] += 1
@@ -433,6 +440,8 @@ def _loss_weights(
     config: ExperimentConfig,
     label_to_idx: dict[str, int],
 ) -> Tensor:
+    """Build class priors dictionary from experiment config for
+    reweighting and sampling strategies."""
     priors = _priors(config)
     counts: dict[str, int] = dict.fromkeys(ALL_LABELS, 0)
     for record in records:
@@ -444,6 +453,8 @@ def _loss_weights(
 
 
 def _build_scheduler(config: ExperimentConfig, optimizer: torch.optim.Optimizer):
+    """Build a learning rate scheduler based on experiment config,
+    supporting warmup and plateau strategies."""
     if config.scheduler.name == "reduce_on_plateau":
         return torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
@@ -475,6 +486,8 @@ def _build_scheduler(config: ExperimentConfig, optimizer: torch.optim.Optimizer)
 
 
 def _prediction_from_probs(strategy: str, probs: np.ndarray) -> np.ndarray:
+    """Convert model output probabilities to predicted class indices
+    based on the specified evaluation strategy."""
     cmd_idx = np.arange(len(COMMAND_LABELS))
     unknown_idx = len(COMMAND_LABELS)
     silence_idx = len(COMMAND_LABELS) + 1
@@ -507,6 +520,8 @@ def _evaluate_predictions(
     probs: list[list[float]],
     strategy: str,
 ) -> dict[str, Any]:
+    """ "Compute evaluation metrics based on the given targets,
+    predicted probabilities, and evaluation strategy."""
     probs_np = np.array(probs, dtype=np.float32)
     preds = _prediction_from_probs(strategy, probs_np)
     targets_list = [int(value) for value in targets]
@@ -553,6 +568,8 @@ def _predict(
     device: torch.device,
     warmup_iterations: int = 0,
 ) -> tuple[list[int], list[list[float]], float]:
+    """ "Run model inference on the given data loader
+    and return targets, predicted probabilities, and average latency."""
     model.eval()
     targets: list[int] = []
     probs: list[list[float]] = []
@@ -587,11 +604,13 @@ def _predict(
 
 
 def _build_run_dir(config: ExperimentConfig, output_dir: Path, run_name: str) -> Path:
+    """Build the directory path for the current run based on
+    the experiment config and run name, creating it if needed."""
     phase_dir = output_dir / _phase_dir_name(config) / "runs" / run_name
-    phase_dir.mkdir(parents=True, exist_ok=True)
+    if config.mlflow.enabled:
+        return phase_dir
 
-    # On macOS, this marker asks Spotlight to skip indexing generated artifacts,
-    # reducing mds CPU spikes between trials/phases.
+    phase_dir.mkdir(parents=True, exist_ok=True)
     for index_root in (output_dir, output_dir / _phase_dir_name(config), phase_dir):
         with contextlib.suppress(OSError):
             (index_root / ".metadata_never_index").touch(exist_ok=True)
@@ -603,6 +622,8 @@ class SharedTwoHeadLoss(nn.Module):
     """Loss for shared-backbone two-head training (10 command + 2 non-command)."""
 
     def forward(self, logits: Tensor, targets: Tensor) -> Tensor:  # type: ignore[override]
+        """Compute combined loss for shared two-head strategy
+        by separating command and non-command samples."""
         command_mask = targets < len(COMMAND_LABELS)
         non_command_mask = ~command_mask
         losses: list[Tensor] = []
@@ -623,7 +644,6 @@ class SharedTwoHeadLoss(nn.Module):
 
 
 def _fit_model(
-    *,
     config: ExperimentConfig,
     model: nn.Module,
     train_loader: FeatureBatchLoader,
@@ -633,7 +653,6 @@ def _fit_model(
     loss_fn: nn.Module | None = None,
 ) -> tuple[TrainingEngine, dict[str, Any]]:
     """Train one model component and return engine plus fit payload."""
-
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.optimizer.learning_rate,
@@ -651,19 +670,16 @@ def _fit_model(
         keep_last_n=config.checkpointing.keep_last_n,
         loss_fn=loss_fn or nn.CrossEntropyLoss(),
     )
-    fit_payload, fit_performance = execute_with_profile(
-        lambda: engine.fit(train_loader, val_loader, tracker=tracker)
-    )
-    fit_payload = {**fit_payload, "training_performance": fit_performance}
+
+    t0 = perf_counter()
+    fit_payload = engine.fit(train_loader, val_loader, tracker=tracker)
+    fit_time_ms = (perf_counter() - t0) * 1000.0
     if tracker is not None:
         tracker.log_training_metrics(
             epoch=int(fit_payload.get("epoch", config.training.epochs)),
             step=int(fit_payload.get("step", 0)),
             extra_metrics={
-                "training_elapsed_ms": float(fit_performance.get("elapsed_ms", 0.0)),
-                "training_rss_mb_before": float(fit_performance.get("rss_mb_before", 0.0)),
-                "training_rss_mb_after": float(fit_performance.get("rss_mb_after", 0.0)),
-                "training_rss_mb_delta": float(fit_performance.get("rss_mb_delta", 0.0)),
+                "training_elapsed_ms": float(fit_time_ms),
             },
         )
     return engine, fit_payload
@@ -671,7 +687,6 @@ def _fit_model(
 
 def _start_run_tracker(config: ExperimentConfig, run_name: str) -> Any | None:
     """Create and start an MLflow tracker when enabled in config."""
-
     if getattr(config, "mlflow", None) is None or not getattr(config.mlflow, "enabled", False):
         return None
     try:

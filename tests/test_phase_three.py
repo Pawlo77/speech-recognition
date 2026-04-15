@@ -156,8 +156,8 @@ def test_phase_three_sweep_skips_completed_trials_and_loads_previous_phase_artif
 
     calls: list[list[str]] = []
 
-    def fake_run(command, *, check, env, text, capture_output):
-        _ = check, env, text, capture_output
+    def fake_run(command, env, check):
+        _ = env, check
         calls.append(list(command))
         run_name = command[command.index("--run-name") + 1]
         config_path = output_dir / "phase_3" / "runs" / run_name / "temp_config.json"
@@ -189,10 +189,13 @@ def test_phase_three_sweep_skips_completed_trials_and_loads_previous_phase_artif
 
         class _CompletedProcess:
             returncode = 0
+            stdout = ""
 
         return _CompletedProcess()
 
-    monkeypatch.setattr("speech_recognition.orchestration.phase_three.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "speech_recognition.orchestration.phase_three.run_subprocess_with_live_output", fake_run
+    )
 
     payload = runner.execute()
 
