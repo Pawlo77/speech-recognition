@@ -23,6 +23,7 @@ from ..config import ExperimentConfig, MLflowTrackingConfig
 from ..models import DEFAULT_INPUT_BINS, DEFAULT_TARGET_FRAMES, build_model_adapter
 
 os.environ["MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING"] = "true"
+os.environ["MLFLOW_RUN_CONTEXT_PROVIDER"] = "sysmetrics"
 
 _EFFICIENCY_CACHE: dict[str, dict[str, float]] = {}
 _TRACKING_LOGGER = logging.getLogger(__name__)

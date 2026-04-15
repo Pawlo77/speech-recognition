@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -257,6 +258,11 @@ class TrainingEngine:
 
     def evaluate(self, data_loader: Any) -> dict[str, float]:
         """Evaluate loss and macro-F1 over a validation loader."""
+        logger = logging.getLogger(__name__)
+        batch_count = len(data_loader)
+        started_at = perf_counter()
+        logger.info("[val] starting validation loop batches=%d", batch_count)
+
         self.model.eval()
         total_loss = 0.0
         total_examples = 0
@@ -282,6 +288,16 @@ class TrainingEngine:
 
         macro_f1 = _macro_f1_score(targets, predictions)
         average_loss = total_loss / total_examples if total_examples else 0.0
+        elapsed_ms = (perf_counter() - started_at) * 1000.0
+        logger.info(
+            "[val] completed validation loop batches=%d examples=%d elapsed_ms=%.2f "
+            "validation_loss=%.6f validation_macro_f1=%.6f",
+            batch_count,
+            total_examples,
+            elapsed_ms,
+            average_loss,
+            macro_f1,
+        )
         return {"validation_loss": average_loss, "validation_macro_f1": macro_f1}
 
     def fit(
@@ -333,6 +349,15 @@ class TrainingEngine:
         ):
             try:
                 steps_this_epoch = len(train_loader)
+                epoch_started_at = perf_counter()
+                logger.info(
+                    "[train] starting epoch %d/%d global_step=%d resumed=%s batches=%d",
+                    epoch + 1,
+                    self.training_config.epochs,
+                    global_step,
+                    latest_checkpoint is not None,
+                    steps_this_epoch,
+                )
                 for batch_index, batch in tqdm(
                     enumerate(train_loader),
                     total=steps_this_epoch,
@@ -388,8 +413,16 @@ class TrainingEngine:
                         stop_training = True
                         break
                 batch_offset = 0
+                validation_started_at = perf_counter()
+                validation_time_ms = 0.0
                 if val_loader is not None:
+                    logger.info(
+                        "[train] starting validation for epoch %d/%d",
+                        epoch + 1,
+                        self.training_config.epochs,
+                    )
                     last_validation = self.evaluate(val_loader)
+                    validation_time_ms = (perf_counter() - validation_started_at) * 1000.0
                     logger.info(
                         "[val] epoch=%d/%d validation_loss=%.6f validation_macro_f1=%.6f",
                         epoch + 1,
@@ -444,11 +477,15 @@ class TrainingEngine:
                         else:
                             scheduler_step()
                 last_checkpoint_path = self.save_checkpoint(epoch=epoch + 1, step=global_step)
+                epoch_elapsed_ms = (perf_counter() - epoch_started_at) * 1000.0
                 logger.info(
-                    "[train] completed epoch %d/%d global_step=%d",
+                    "[train] completed epoch %d/%d global_step=%d epoch_elapsed_ms=%.2f "
+                    "validation_elapsed_ms=%.2f",
                     epoch + 1,
                     self.training_config.epochs,
                     global_step,
+                    epoch_elapsed_ms,
+                    validation_time_ms,
                 )
                 if tracker is not None and hasattr(tracker, "log_training_metrics"):
                     try:

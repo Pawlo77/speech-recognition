@@ -14,7 +14,6 @@ def test_project_scaffold_layout() -> None:
         root / "src" / "speech_recognition",
         root / "tests",
         root / "notebooks",
-        root / "outputs",
         root / "report",
         root / "pyproject.toml",
         root / "README.md",

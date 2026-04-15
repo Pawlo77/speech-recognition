@@ -92,7 +92,7 @@ status:
 
 # Execute the full pipeline
 full-pipeline:
-	uv run speech-recognition run --output-dir outputs --run-name default
+	uv run speech-recognition run --output-dir outputs --run-name default --mlflow-only
 
 # Execute all orchestration phases with lightweight smoke-test limits.
 full-pipeline-check:

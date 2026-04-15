@@ -228,9 +228,20 @@ class FeatureBatchLoader:
             logger = logging.getLogger(__name__)
             logger.exception("Prefetch worker error: %s", exc)
         finally:
-            # Signal completion
-            with contextlib.suppress(queue.Full):
-                self._prefetch_queue.put_nowait(None)
+            self._signal_completion()
+
+    def _signal_completion(self) -> None:
+        """Enqueue the end-of-stream sentinel, waiting for queue space if needed."""
+        if self._worker_stop_event is None:
+            return
+        while True:
+            if self._worker_stop_event.is_set():
+                return
+            try:
+                self._prefetch_queue.put(None, timeout=1)
+                return
+            except queue.Full:
+                continue
 
     def __iter__(self):
         """Iterate over batches with background prefetching."""
@@ -570,6 +581,11 @@ def _predict(
 ) -> tuple[list[int], list[list[float]], float]:
     """ "Run model inference on the given data loader
     and return targets, predicted probabilities, and average latency."""
+    logger = logging.getLogger(__name__)
+    batch_count = len(loader)
+    started_at = perf_counter()
+    logger.info("[test] starting inference loop strategy=%s batches=%d", strategy, batch_count)
+
     model.eval()
     targets: list[int] = []
     probs: list[list[float]] = []
@@ -600,6 +616,16 @@ def _predict(
             probs.extend(probabilities.detach().cpu().tolist())
     _ = strategy
     latency = float(sum(timings_ms) / len(timings_ms)) if timings_ms else 0.0
+    elapsed_ms = (perf_counter() - started_at) * 1000.0
+    logger.info(
+        "[test] completed inference loop strategy=%s batches=%d examples=%d elapsed_ms=%.2f "
+        "mean_latency_ms=%.2f",
+        strategy,
+        batch_count,
+        len(targets),
+        elapsed_ms,
+        latency,
+    )
     return targets, probs, latency
 
 
