@@ -61,7 +61,7 @@ def test_readme_shell_code_blocks_use_valid_commands() -> None:
         "make full-pipeline",
         "make eta-estimate",
         "make estimate-ram",
-        "mlflow ui --backend-store-uri mlruns",
+        "mlflow ui --backend-store-uri sqlite:///mlruns.db --default-artifact-root ./mlruns",
         "speech-recognition mlflow-ui",
     ]
     for command in expected_commands:

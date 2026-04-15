@@ -457,8 +457,8 @@ class TrainingControlConfig:
     """Optional gradient clipping threshold."""
     deterministic: bool = True
     """Enable deterministic execution where possible."""
-    use_mixed_precision: bool = False
-    """Enable mixed precision when the backend supports it."""
+    use_mixed_precision: bool = True
+    """Enable mixed precision when the backend supports it (GPU throughput optimization)."""
 
     def __post_init__(self) -> None:
         _require_int("epochs", self.epochs)
@@ -531,8 +531,8 @@ class MLflowTrackingConfig:
 
     enabled: bool = True
     """Enable MLflow tracking."""
-    tracking_uri: str = "mlruns"
-    """MLflow tracking URI."""
+    tracking_uri: str = "sqlite:///mlruns.db"
+    """MLflow tracking URI (SQLite backend for SQL-based trace metrics support)."""
     experiment_name: str = "speech-recognition"
     """MLflow experiment name."""
     run_name: str | None = None
@@ -561,6 +561,11 @@ class MLflowTrackingConfig:
         """Build an MLflow tracking config from a mapping."""
 
         mapping = _extract_mapping(data, name="MLflowTrackingConfig")
+        # Backward compatibility: older runs persisted the previous default
+        # file-store value "mlruns". Migrate that legacy default to SQLite so
+        # modern MLflow UI endpoints (trace metrics) work without manual edits.
+        if mapping.get("tracking_uri") == "mlruns":
+            mapping = {**mapping, "tracking_uri": "sqlite:///mlruns.db"}
         return cls(**dict(mapping))
 
 

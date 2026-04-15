@@ -2,12 +2,10 @@
 
 import json
 import logging
-import os
 import subprocess
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +14,13 @@ from tqdm.auto import tqdm
 from ..config import ExperimentConfig, SchedulerConfig
 from .phase_one import _atomic_write_json, _feature_pipeline_for_trial, _read_json, _serialize
 from .services import build_isolated_subprocess_env
+from .sweep_utils import (
+    apply_trial_cap,
+    iter_nested_payloads,
+    summary_from_completed_process,
+    sweep_seeds,
+    utc_now,
+)
 
 PHASE_TWO_WEIGHT_DECAYS: tuple[float, float] = (0.01, 0.1)
 """Weight decay values included in the phase-2 sweep."""
@@ -32,38 +37,15 @@ PHASE_TWO_SEEDS: tuple[int, int, int] = (0, 42, 2003)
 PHASE_TWO_STATE_SCHEMA_VERSION: int = 1
 """Schema version for the phase-2 sweep state file."""
 
-_SWEEP_MAX_TRIALS_ENV = "SPEECH_SWEEP_MAX_TRIALS"
-_SWEEP_SEED_ENV = "SPEECH_SWEEP_SEED"
-
 
 def _apply_trial_cap(trials: tuple[Any, ...]) -> tuple[Any, ...]:
-    """Return a capped trial tuple when a smoke-limit env override is set."""
-
-    raw_limit = os.environ.get(_SWEEP_MAX_TRIALS_ENV)
-    if raw_limit in {None, ""}:
-        return trials
-    try:
-        limit = int(raw_limit)
-    except ValueError as exc:
-        raise ValueError(f"{_SWEEP_MAX_TRIALS_ENV} must be an integer.") from exc
-    if limit <= 0:
-        raise ValueError(f"{_SWEEP_MAX_TRIALS_ENV} must be greater than zero.")
-    return trials[:limit]
+    return apply_trial_cap(trials)
 
 
 def _sweep_seeds() -> tuple[int, ...]:
     """Return default seeds or a single-seed override for smoke runs."""
 
-    raw_seed = os.environ.get(_SWEEP_SEED_ENV)
-    if raw_seed in {None, ""}:
-        return PHASE_TWO_SEEDS
-    try:
-        seed = int(raw_seed)
-    except ValueError as exc:
-        raise ValueError(f"{_SWEEP_SEED_ENV} must be an integer.") from exc
-    if seed not in PHASE_TWO_SEEDS:
-        raise ValueError(f"{_SWEEP_SEED_ENV} must be one of {PHASE_TWO_SEEDS}.")
-    return (seed,)
+    return sweep_seeds(PHASE_TWO_SEEDS)
 
 
 def _phase_two_group_key(record: "PhaseTwoTrialRecord") -> tuple[str, str, float, str]:
@@ -124,56 +106,33 @@ def _select_phase_two_winner(
 
 
 def _utc_now() -> str:
-    """Return the current UTC timestamp as an ISO-8601 string."""
-
-    return datetime.now(UTC).isoformat()
+    return utc_now()
 
 
 def _phase_two_score(payload: Mapping[str, Any]) -> float:
     """Extract the validation macro-F1 score from a child payload."""
 
-    if not isinstance(payload, Mapping):
-        return 0.0
+    for nested_payload in iter_nested_payloads(payload):
+        score = nested_payload.get("validation_macro_f1")
+        if isinstance(score, int | float):
+            return float(score)
 
-    score = payload.get("validation_macro_f1")
-    if isinstance(score, int | float):
-        return float(score)
-
-    metrics = payload.get("metrics")
-    if isinstance(metrics, Mapping):
-        metric_value = metrics.get("validation_macro_f1", metrics.get("macro_f1"))
-        if isinstance(metric_value, int | float):
-            return float(metric_value)
-
-    phase_artifacts = payload.get("phase_artifacts")
-    if isinstance(phase_artifacts, Mapping):
-        for artifact in phase_artifacts.values():
-            if isinstance(artifact, Mapping):
-                output_data = artifact.get("output_data")
-                if isinstance(output_data, Mapping):
-                    score = _phase_two_score(output_data)
-                    if score > 0.0:
-                        return score
+        metrics = nested_payload.get("metrics")
+        if isinstance(metrics, Mapping):
+            metric_value = metrics.get("validation_macro_f1", metrics.get("macro_f1"))
+            if isinstance(metric_value, int | float):
+                return float(metric_value)
     return 0.0
 
 
 def _summary_from_completed_process(
     child_state_path: Path, completed_process: subprocess.CompletedProcess[str]
 ) -> dict[str, Any]:
-    """Load child summary from state file first, then subprocess JSON stdout."""
-
-    if child_state_path.exists():
-        try:
-            payload = _read_json(child_state_path)
-            if isinstance(payload, dict):
-                return payload
-        except (json.JSONDecodeError, OSError):
-            pass
-    try:
-        payload = json.loads(completed_process.stdout or "{}")
-    except json.JSONDecodeError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    return summary_from_completed_process(
+        child_state_path,
+        completed_process,
+        read_json=_read_json,
+    )
 
 
 def _feature_artifact_trial_payload(feature_artifact_path: Path) -> dict[str, Any]:

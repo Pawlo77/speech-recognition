@@ -2,12 +2,10 @@
 
 import json
 import logging
-import os
 import subprocess
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +13,13 @@ from tqdm.auto import tqdm
 
 from ..config import ExperimentConfig, FeaturePipelineConfig
 from .services import build_isolated_subprocess_env
+from .sweep_utils import (
+    apply_trial_cap,
+    iter_nested_payloads,
+    summary_from_completed_process,
+    sweep_seeds,
+    utc_now,
+)
 
 PHASE_ONE_FEATURES: tuple[str, ...] = (
     "mel_spectrogram",
@@ -34,38 +39,15 @@ PHASE_ONE_SEEDS: tuple[int, int, int] = (0, 42, 2003)
 PHASE_ONE_STATE_SCHEMA_VERSION: int = 1
 """Schema version for the phase-1 sweep state file."""
 
-_SWEEP_MAX_TRIALS_ENV = "SPEECH_SWEEP_MAX_TRIALS"
-_SWEEP_SEED_ENV = "SPEECH_SWEEP_SEED"
-
 
 def _apply_trial_cap(trials: tuple[Any, ...]) -> tuple[Any, ...]:
-    """Return a capped trial tuple when a smoke-limit env override is set."""
-
-    raw_limit = os.environ.get(_SWEEP_MAX_TRIALS_ENV)
-    if raw_limit in {None, ""}:
-        return trials
-    try:
-        limit = int(raw_limit)
-    except ValueError as exc:
-        raise ValueError(f"{_SWEEP_MAX_TRIALS_ENV} must be an integer.") from exc
-    if limit <= 0:
-        raise ValueError(f"{_SWEEP_MAX_TRIALS_ENV} must be greater than zero.")
-    return trials[:limit]
+    return apply_trial_cap(trials)
 
 
 def _sweep_seeds() -> tuple[int, ...]:
     """Return default seeds or a single-seed override for smoke runs."""
 
-    raw_seed = os.environ.get(_SWEEP_SEED_ENV)
-    if raw_seed in {None, ""}:
-        return PHASE_ONE_SEEDS
-    try:
-        seed = int(raw_seed)
-    except ValueError as exc:
-        raise ValueError(f"{_SWEEP_SEED_ENV} must be an integer.") from exc
-    if seed not in PHASE_ONE_SEEDS:
-        raise ValueError(f"{_SWEEP_SEED_ENV} must be one of {PHASE_ONE_SEEDS}.")
-    return (seed,)
+    return sweep_seeds(PHASE_ONE_SEEDS)
 
 
 def _phase_one_group_key(record: "PhaseOneTrialRecord") -> tuple[str, str]:
@@ -119,9 +101,7 @@ def _select_phase_one_winner(
 
 
 def _utc_now() -> str:
-    """Return the current UTC timestamp as an ISO-8601 string."""
-
-    return datetime.now(UTC).isoformat()
+    return utc_now()
 
 
 def _serialize(value: Any) -> Any:
@@ -175,55 +155,27 @@ def _feature_pipeline_for_trial(feature_name: str) -> FeaturePipelineConfig:
 def _trial_score(payload: Mapping[str, Any]) -> float:
     """Extract the validation macro-F1 score from a child payload."""
 
-    if not isinstance(payload, Mapping):
-        return 0.0
+    for nested_payload in iter_nested_payloads(payload):
+        score = nested_payload.get("validation_macro_f1")
+        if isinstance(score, int | float):
+            return float(score)
 
-    score = payload.get("validation_macro_f1")
-    if isinstance(score, int | float):
-        return float(score)
-
-    metrics = payload.get("metrics")
-    if isinstance(metrics, Mapping):
-        metric_value = metrics.get("validation_macro_f1", metrics.get("macro_f1"))
-        if isinstance(metric_value, int | float):
-            return float(metric_value)
-
-    phase_artifacts = payload.get("phase_artifacts")
-    if isinstance(phase_artifacts, Mapping):
-        for artifact in phase_artifacts.values():
-            if isinstance(artifact, Mapping):
-                output_data = artifact.get("output_data")
-                if isinstance(output_data, Mapping):
-                    score = _trial_score(output_data)
-                    if score > 0.0:
-                        return score
+        metrics = nested_payload.get("metrics")
+        if isinstance(metrics, Mapping):
+            metric_value = metrics.get("validation_macro_f1", metrics.get("macro_f1"))
+            if isinstance(metric_value, int | float):
+                return float(metric_value)
     return 0.0
-
-
-def _load_child_summary(child_state_path: Path) -> dict[str, Any]:
-    """Load the child run summary used to score a trial."""
-
-    if not child_state_path.exists():
-        return {}
-    try:
-        return _read_json(child_state_path)
-    except (json.JSONDecodeError, OSError):
-        return {}
 
 
 def _summary_from_completed_process(
     child_state_path: Path, completed_process: subprocess.CompletedProcess[str]
 ) -> dict[str, Any]:
-    """Load child summary from state file first, then subprocess JSON stdout."""
-
-    summary = _load_child_summary(child_state_path)
-    if summary:
-        return summary
-    try:
-        payload = json.loads(completed_process.stdout or "{}")
-    except json.JSONDecodeError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    return summary_from_completed_process(
+        child_state_path,
+        completed_process,
+        read_json=_read_json,
+    )
 
 
 def build_phase_one_command(config_path: Path, run_name: str, output_dir: Path) -> list[str]:

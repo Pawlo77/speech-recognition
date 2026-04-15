@@ -3,15 +3,14 @@
 import resource
 import sys
 from collections.abc import Callable
-from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any
 
+from .sweep_utils import utc_now
+
 
 def _utc_now() -> str:
-    """Return the current UTC timestamp as an ISO-8601 string."""
-
-    return datetime.now(UTC).isoformat()
+    return utc_now()
 
 
 def _rss_mb() -> float:

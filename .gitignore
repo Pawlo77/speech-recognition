@@ -6,6 +6,8 @@ report/build_latex/report.bbl
 report/build_latex/report.synctex.gz
 
 .DS_Store
+.metadata_never_index
+**/.metadata_never_index
 
 uv.lock
 

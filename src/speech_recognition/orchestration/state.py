@@ -3,11 +3,11 @@
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, is_dataclass, replace
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Self
 
 from ..config import ExperimentConfig
+from .sweep_utils import utc_now
 
 PHASE_ORDER: tuple[str, ...] = ("phase-1", "phase-2", "phase-3", "phase-4")
 """Canonical execution order for the pipeline."""
@@ -17,9 +17,7 @@ STATE_SCHEMA_VERSION: int = 1
 
 
 def _utc_now() -> str:
-    """Return the current UTC timestamp as an ISO-8601 string."""
-
-    return datetime.now(UTC).isoformat()
+    return utc_now()
 
 
 def _serialize(value: Any) -> Any:

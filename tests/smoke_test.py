@@ -15,7 +15,6 @@ def test_project_scaffold_layout() -> None:
         root / "tests",
         root / "notebooks",
         root / "outputs",
-        root / "logs",
         root / "report",
         root / "pyproject.toml",
         root / "README.md",

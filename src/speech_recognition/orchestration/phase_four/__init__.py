@@ -2,12 +2,10 @@
 
 import json
 import logging
-import os
 import subprocess
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
 from itertools import combinations
 from pathlib import Path
 from typing import Any
@@ -15,11 +13,23 @@ from typing import Any
 import numpy as np
 from tqdm.auto import tqdm
 
-from ..config import ExperimentConfig, ModelConfig
-from .phase_one import _atomic_write_json, _read_json, _serialize
-from .phase_three import PhaseThreeTrialRecord
-from .phase_two import _scheduler_config_for_trial
-from .services import build_isolated_subprocess_env
+from ...config import ExperimentConfig
+from ..phase_one import _atomic_write_json, _read_json, _serialize
+from ..phase_three import PhaseThreeTrialRecord
+from ..phase_two import _scheduler_config_for_trial
+from ..services import build_isolated_subprocess_env
+from ..sweep_utils import (
+    apply_trial_cap,
+    summary_from_completed_process,
+    sweep_seeds,
+    utc_now,
+)
+from .utils import (
+    _build_backbone_model_config,
+    _phase_four_optimizer_config,
+    _phase_four_prediction_artifact_recursive,
+    _phase_four_score_recursive,
+)
 
 PHASE_FOUR_STATE_SCHEMA_VERSION: int = 1
 """Schema version for the phase-4 sweep state file."""
@@ -39,216 +49,19 @@ PHASE_FOUR_STRICT_DROP_LIMIT: float = 0.01
 PHASE_FOUR_WARMUP_ITERATIONS: int = 50
 """Warmup iterations excluded from latency measurement."""
 
-_SWEEP_MAX_TRIALS_ENV = "SPEECH_SWEEP_MAX_TRIALS"
-_SWEEP_SEED_ENV = "SPEECH_SWEEP_SEED"
-
 
 def _apply_trial_cap(trials: tuple[Any, ...]) -> tuple[Any, ...]:
-    """Return a capped trial tuple when a smoke-limit env override is set."""
-
-    raw_limit = os.environ.get(_SWEEP_MAX_TRIALS_ENV)
-    if raw_limit in {None, ""}:
-        return trials
-    try:
-        limit = int(raw_limit)
-    except ValueError as exc:
-        raise ValueError(f"{_SWEEP_MAX_TRIALS_ENV} must be an integer.") from exc
-    if limit <= 0:
-        raise ValueError(f"{_SWEEP_MAX_TRIALS_ENV} must be greater than zero.")
-    return trials[:limit]
+    return apply_trial_cap(trials)
 
 
 def _sweep_seeds(seeds: tuple[int, ...]) -> tuple[int, ...]:
     """Return input seeds or a single-seed override for smoke runs."""
 
-    raw_seed = os.environ.get(_SWEEP_SEED_ENV)
-    if raw_seed in {None, ""}:
-        return seeds
-    try:
-        seed = int(raw_seed)
-    except ValueError as exc:
-        raise ValueError(f"{_SWEEP_SEED_ENV} must be an integer.") from exc
-    if seed not in seeds:
-        raise ValueError(f"{_SWEEP_SEED_ENV} must be one of {seeds}.")
-    return (seed,)
+    return sweep_seeds(seeds)
 
 
 def _utc_now() -> str:
-    """Return the current UTC timestamp as an ISO-8601 string."""
-
-    return datetime.now(UTC).isoformat()
-
-
-def _phase_four_score(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Extract phase-4 metrics from a child payload."""
-
-    if not isinstance(payload, Mapping):
-        return {
-            "core_command_macro_f1": 0.0,
-            "unknown_f1": 0.0,
-            "silence_f1": 0.0,
-            "macro_f1_nc": 0.0,
-            "inference_latency_ms_mean": 0.0,
-            "unknown_to_command_leakage": 0.0,
-            "silence_false_trigger_rate": 0.0,
-            "per_class": {},
-        }
-
-    metrics = payload.get("metrics") if isinstance(payload.get("metrics"), Mapping) else {}
-    core_command_macro_f1 = payload.get(
-        "core_command_macro_f1",
-        metrics.get("core_command_macro_f1", metrics.get("macro_f1", 0.0)),
-    )
-    unknown_f1 = payload.get("unknown_f1", metrics.get("unknown_f1", 0.0))
-    silence_f1 = payload.get("silence_f1", metrics.get("silence_f1", 0.0))
-    macro_f1_nc = payload.get(
-        "macro_f1_nc",
-        metrics.get("macro_f1_nc", (float(unknown_f1) + float(silence_f1)) / 2.0),
-    )
-    inference_latency_ms_mean = payload.get(
-        "inference_latency_ms_mean",
-        metrics.get("inference_latency_ms_mean", 0.0),
-    )
-    unknown_to_command_leakage = payload.get(
-        "unknown_to_command_leakage",
-        metrics.get("unknown_to_command_leakage", 0.0),
-    )
-    silence_false_trigger_rate = payload.get(
-        "silence_false_trigger_rate",
-        metrics.get("silence_false_trigger_rate", 0.0),
-    )
-    per_class = payload.get(
-        "per_class",
-        metrics.get("per_class", {}),
-    )
-
-    return {
-        "core_command_macro_f1": float(core_command_macro_f1),
-        "unknown_f1": float(unknown_f1),
-        "silence_f1": float(silence_f1),
-        "macro_f1_nc": float(macro_f1_nc),
-        "inference_latency_ms_mean": float(inference_latency_ms_mean),
-        "unknown_to_command_leakage": float(unknown_to_command_leakage),
-        "silence_false_trigger_rate": float(silence_false_trigger_rate),
-        "per_class": per_class,
-    }
-
-
-def _phase_four_score_recursive(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Extract phase-4 metrics from nested child payload structures."""
-
-    metrics = _phase_four_score(payload)
-    if metrics["core_command_macro_f1"] > 0.0 or metrics["macro_f1_nc"] > 0.0:
-        return metrics
-
-    phase_artifacts = payload.get("phase_artifacts")
-    if isinstance(phase_artifacts, Mapping):
-        for artifact in phase_artifacts.values():
-            if isinstance(artifact, Mapping):
-                output_data = artifact.get("output_data")
-                if isinstance(output_data, Mapping):
-                    nested_metrics = _phase_four_score_recursive(output_data)
-                    if (
-                        nested_metrics["core_command_macro_f1"] > 0.0
-                        or nested_metrics["macro_f1_nc"] > 0.0
-                    ):
-                        return nested_metrics
-    return metrics
-
-
-def _phase_four_prediction_artifact_recursive(payload: Mapping[str, Any]) -> str | None:
-    """Extract prediction artifact path from nested child payload structures."""
-
-    direct_path = payload.get("prediction_artifact")
-    if isinstance(direct_path, str) and direct_path:
-        return direct_path
-
-    phase_artifacts = payload.get("phase_artifacts")
-    if isinstance(phase_artifacts, Mapping):
-        for artifact in phase_artifacts.values():
-            if isinstance(artifact, Mapping):
-                output_data = artifact.get("output_data")
-                if isinstance(output_data, Mapping):
-                    nested = _phase_four_prediction_artifact_recursive(output_data)
-                    if nested:
-                        return nested
-    return None
-
-
-def _build_backbone_model_config(backbone_trial: PhaseThreeTrialRecord) -> ModelConfig:
-    """Build a model config representative of one frozen phase-3 backbone."""
-
-    family = backbone_trial.family
-    params = backbone_trial.architecture_params
-    if family == "ast":
-        return ModelConfig(
-            family="ast",
-            pretrained=False,
-            dropout=float(params["dropout"]),
-            ast_head=str(params.get("head", "linear")),
-            ast_positional_embedding=str(params.get("positional_embedding", "interp")),
-            ast_hidden_size=int(params.get("hidden_size", 512)),
-            ast_num_hidden_layers=int(params.get("num_layers", 10)),
-            ast_num_attention_heads=int(params.get("num_heads", 8)),
-            ast_intermediate_size=int(params.get("intermediate_size", 2048)),
-        )
-    if family == "convnext":
-        return ModelConfig(
-            family="convnext",
-            pretrained=False,
-            stochastic_depth=float(params["stochastic_depth"]),
-        )
-    if family == "ssamba":
-        return ModelConfig(
-            family="ssamba",
-            pretrained=False,
-            ssamba_pooling=str(params.get("pooling", "mean")),
-            ssamba_use_cls=bool(params.get("use_cls", True)),
-            ssamba_stride_ms=int(params.get("stride_ms", 10)),
-            ssamba_d_model=int(params.get("d_model", 768)),
-            ssamba_d_state=int(params.get("d_state", 64)),
-            ssamba_expand=int(params.get("expand", 2)),
-            ssamba_num_layers=int(params.get("num_layers", 8)),
-        )
-    if family == "xlstm":
-        return ModelConfig(
-            family="xlstm",
-            pretrained=False,
-            xlstm_dim=int(params.get("dimension", 768)),
-            xlstm_num_blocks=int(params.get("num_blocks", 10)),
-            xlstm_state_reset=bool(params.get("state_reset", True)),
-            xlstm_output_mode=str(params.get("output_mode", "final")),
-        )
-    if family == "mlp_mixer":
-        return ModelConfig(
-            family="mlp_mixer",
-            pretrained=False,
-            dropout=float(params.get("dropout", 0.0)),
-            mlp_head_l2_norm=bool(params.get("head_l2_norm", True)),
-        )
-    raise ValueError(f"Unsupported phase-3 backbone family '{family}'.")
-
-
-def _phase_four_optimizer_config(optim_artifact: Mapping[str, Any]) -> dict[str, Any]:
-    """Extract the phase-2 winning optimizer payload for phase-4 reuse."""
-
-    trial = optim_artifact.get("trial")
-    if not isinstance(trial, Mapping):
-        raise ValueError("Phase-2 best optimization artifact is missing the trial payload.")
-
-    scheduler_name = trial.get("scheduler_name")
-    if not isinstance(scheduler_name, str):
-        raise ValueError("Phase-2 best optimization artifact is missing scheduler_name.")
-
-    weight_decay = trial.get("weight_decay")
-    if not isinstance(weight_decay, int | float):
-        raise ValueError("Phase-2 best optimization artifact is missing weight_decay.")
-
-    return {
-        "scheduler_name": scheduler_name,
-        "weight_decay": float(weight_decay),
-        "trial": dict(trial),
-    }
+    return utc_now()
 
 
 def build_phase_four_command(config_path: Path, run_name: str) -> list[str]:
@@ -288,20 +101,11 @@ def build_phase_four_test_command(config_path: Path, run_name: str) -> list[str]
 def _summary_from_completed_process(
     child_state_path: Path, completed_process: subprocess.CompletedProcess[str]
 ) -> dict[str, Any]:
-    """Load child summary from state file first, then subprocess JSON stdout."""
-
-    if child_state_path.exists():
-        try:
-            payload = _read_json(child_state_path)
-            if isinstance(payload, dict):
-                return payload
-        except (json.JSONDecodeError, OSError):
-            pass
-    try:
-        payload = json.loads(completed_process.stdout or "{}")
-    except json.JSONDecodeError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    return summary_from_completed_process(
+        child_state_path,
+        completed_process,
+        read_json=_read_json,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -690,106 +494,135 @@ class PhaseFourSweepRunner:
 
         results: list[dict[str, Any]] = []
         for (method, seed), method_records in grouped.items():
-            by_backbone = {record.baseline_backbone_id: record for record in method_records}
+            artifact_by_backbone = {
+                record.baseline_backbone_id: record.prediction_artifact
+                for record in method_records
+                if record.prediction_artifact
+            }
             ordered_ids = [
-                trial_id for trial_id in phase_three_trial_ids if trial_id in by_backbone
+                backbone_id
+                for backbone_id in phase_three_trial_ids
+                if backbone_id in artifact_by_backbone
             ]
-            for subset_size in range(1, len(ordered_ids) + 1):
-                for subset in combinations(ordered_ids, subset_size):
-                    payloads = []
-                    for trial_id in subset:
-                        prediction_path = by_backbone[trial_id].prediction_artifact
-                        if not prediction_path:
-                            payloads = []
-                            break
-                        prediction_file = Path(prediction_path)
-                        if not prediction_file.exists():
-                            payloads = []
-                            break
-                        payloads.append(json.loads(prediction_file.read_text(encoding="utf-8")))
-                    if not payloads:
-                        continue
-                    targets = payloads[0]["targets"]
-                    labels = payloads[0].get("labels", [])
-                    unknown_idx = labels.index("__unknown__") if "__unknown__" in labels else None
-                    silence_idx = labels.index("__silence__") if "__silence__" in labels else None
-                    if unknown_idx is None or silence_idx is None:
-                        continue
-                    probabilities = [
-                        np.array(payload["probs"], dtype=float) for payload in payloads
-                    ]
-                    averaged = sum(probabilities) / float(len(probabilities))
-                    predictions = averaged.argmax(axis=1).tolist()
-                    unknown_tp = sum(
-                        1
-                        for target, pred in zip(targets, predictions, strict=True)
-                        if target == unknown_idx and pred == unknown_idx
-                    )
-                    unknown_fp = sum(
-                        1
-                        for target, pred in zip(targets, predictions, strict=True)
-                        if target != unknown_idx and pred == unknown_idx
-                    )
-                    unknown_fn = sum(
-                        1
-                        for target, pred in zip(targets, predictions, strict=True)
-                        if target == unknown_idx and pred != unknown_idx
-                    )
-                    silence_tp = sum(
-                        1
-                        for target, pred in zip(targets, predictions, strict=True)
-                        if target == silence_idx and pred == silence_idx
-                    )
-                    silence_fp = sum(
-                        1
-                        for target, pred in zip(targets, predictions, strict=True)
-                        if target != silence_idx and pred == silence_idx
-                    )
-                    silence_fn = sum(
-                        1
-                        for target, pred in zip(targets, predictions, strict=True)
-                        if target == silence_idx and pred != silence_idx
-                    )
-                    unknown_precision = (
-                        unknown_tp / (unknown_tp + unknown_fp) if (unknown_tp + unknown_fp) else 0.0
-                    )
-                    unknown_recall = (
-                        unknown_tp / (unknown_tp + unknown_fn) if (unknown_tp + unknown_fn) else 0.0
-                    )
-                    silence_precision = (
-                        silence_tp / (silence_tp + silence_fp) if (silence_tp + silence_fp) else 0.0
-                    )
-                    silence_recall = (
-                        silence_tp / (silence_tp + silence_fn) if (silence_tp + silence_fn) else 0.0
-                    )
-                    unknown_f1 = (
-                        2.0
-                        * unknown_precision
-                        * unknown_recall
-                        / (unknown_precision + unknown_recall)
-                        if (unknown_precision + unknown_recall)
-                        else 0.0
-                    )
-                    silence_f1 = (
-                        2.0
-                        * silence_precision
-                        * silence_recall
-                        / (silence_precision + silence_recall)
-                        if (silence_precision + silence_recall)
-                        else 0.0
-                    )
-                    results.append(
-                        {
-                            "method": method,
-                            "seed": seed,
-                            "subset": list(subset),
-                            "subset_size": len(subset),
-                            "macro_f1_nc": (unknown_f1 + silence_f1) / 2.0,
-                            "unknown_f1": unknown_f1,
-                            "silence_f1": silence_f1,
-                        }
-                    )
+            payload_by_backbone = self._load_prediction_payloads(artifact_by_backbone, ordered_ids)
+            results.extend(
+                self._build_ensemble_rows(
+                    method,
+                    seed,
+                    ordered_ids,
+                    payload_by_backbone,
+                )
+            )
         return results
+
+    def _load_prediction_payloads(
+        self,
+        artifact_by_backbone: Mapping[str, str | None],
+        ordered_ids: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        """Load prediction payloads for available backbone artifacts."""
+
+        payload_by_backbone: dict[str, dict[str, Any]] = {}
+        for backbone_id in ordered_ids:
+            prediction_path = artifact_by_backbone.get(backbone_id)
+            if not prediction_path:
+                continue
+            prediction_file = Path(prediction_path)
+            if not prediction_file.exists():
+                continue
+            try:
+                payload = json.loads(prediction_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if isinstance(payload, dict):
+                payload_by_backbone[backbone_id] = payload
+        return payload_by_backbone
+
+    def _f1(self, tp: int, fp: int, fn: int) -> float:
+        precision = tp / (tp + fp) if (tp + fp) else 0.0
+        recall = tp / (tp + fn) if (tp + fn) else 0.0
+        if precision + recall == 0.0:
+            return 0.0
+        return 2.0 * precision * recall / (precision + recall)
+
+    def _build_ensemble_rows(
+        self,
+        method: str,
+        seed: int,
+        ordered_ids: list[str],
+        payload_by_backbone: Mapping[str, Mapping[str, Any]],
+        *,
+        eval_split: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Compute ensemble rows for all backbone subsets for one method/seed pair."""
+
+        rows: list[dict[str, Any]] = []
+        for subset_size in range(1, len(ordered_ids) + 1):
+            for subset in combinations(ordered_ids, subset_size):
+                if any(backbone_id not in payload_by_backbone for backbone_id in subset):
+                    continue
+
+                payloads = [payload_by_backbone[backbone_id] for backbone_id in subset]
+                targets = payloads[0].get("targets")
+                labels = payloads[0].get("labels", [])
+                if not isinstance(targets, list) or not isinstance(labels, list):
+                    continue
+
+                unknown_idx = labels.index("__unknown__") if "__unknown__" in labels else None
+                silence_idx = labels.index("__silence__") if "__silence__" in labels else None
+                if unknown_idx is None or silence_idx is None:
+                    continue
+
+                probabilities = [np.array(payload["probs"], dtype=float) for payload in payloads]
+                averaged = sum(probabilities) / float(len(probabilities))
+                predictions = averaged.argmax(axis=1).tolist()
+
+                unknown_tp = sum(
+                    1
+                    for target, pred in zip(targets, predictions, strict=True)
+                    if target == unknown_idx and pred == unknown_idx
+                )
+                unknown_fp = sum(
+                    1
+                    for target, pred in zip(targets, predictions, strict=True)
+                    if target != unknown_idx and pred == unknown_idx
+                )
+                unknown_fn = sum(
+                    1
+                    for target, pred in zip(targets, predictions, strict=True)
+                    if target == unknown_idx and pred != unknown_idx
+                )
+                silence_tp = sum(
+                    1
+                    for target, pred in zip(targets, predictions, strict=True)
+                    if target == silence_idx and pred == silence_idx
+                )
+                silence_fp = sum(
+                    1
+                    for target, pred in zip(targets, predictions, strict=True)
+                    if target != silence_idx and pred == silence_idx
+                )
+                silence_fn = sum(
+                    1
+                    for target, pred in zip(targets, predictions, strict=True)
+                    if target == silence_idx and pred != silence_idx
+                )
+
+                unknown_f1 = self._f1(unknown_tp, unknown_fp, unknown_fn)
+                silence_f1 = self._f1(silence_tp, silence_fp, silence_fn)
+                row = {
+                    "method": method,
+                    "seed": seed,
+                    "subset": list(subset),
+                    "subset_size": len(subset),
+                    "macro_f1_nc": (unknown_f1 + silence_f1) / 2.0,
+                    "unknown_f1": unknown_f1,
+                    "silence_f1": silence_f1,
+                }
+                if eval_split:
+                    row["eval_split"] = eval_split
+                rows.append(row)
+        return rows
 
     def _ensemble_results_test(
         self,
@@ -810,108 +643,27 @@ class PhaseFourSweepRunner:
         results: list[dict[str, Any]] = []
         for (method, seed), trial_records in grouped.items():
             by_backbone = {
-                record.baseline_backbone_id: (trial_id, record)
-                for trial_id, record in trial_records
+                record.baseline_backbone_id: trial_id for trial_id, record in trial_records
             }
             ordered_ids = [
-                trial_id for trial_id in phase_three_trial_ids if trial_id in by_backbone
+                backbone_id for backbone_id in phase_three_trial_ids if backbone_id in by_backbone
             ]
-            for subset_size in range(1, len(ordered_ids) + 1):
-                for subset in combinations(ordered_ids, subset_size):
-                    payloads = []
-                    for trial_id in subset:
-                        if trial_id not in test_prediction_artifacts:
-                            payloads = []
-                            break
-                        prediction_path = test_prediction_artifacts[trial_id]
-                        prediction_file = Path(prediction_path)
-                        if not prediction_file.exists():
-                            payloads = []
-                            break
-                        payloads.append(json.loads(prediction_file.read_text(encoding="utf-8")))
-                    if not payloads:
-                        continue
-                    targets = payloads[0]["targets"]
-                    labels = payloads[0].get("labels", [])
-                    unknown_idx = labels.index("__unknown__") if "__unknown__" in labels else None
-                    silence_idx = labels.index("__silence__") if "__silence__" in labels else None
-                    if unknown_idx is None or silence_idx is None:
-                        continue
-                    probabilities = [
-                        np.array(payload["probs"], dtype=float) for payload in payloads
-                    ]
-                    averaged = sum(probabilities) / float(len(probabilities))
-                    predictions = averaged.argmax(axis=1).tolist()
-                    unknown_tp = sum(
-                        1
-                        for target, pred in zip(targets, predictions, strict=True)
-                        if target == unknown_idx and pred == unknown_idx
-                    )
-                    unknown_fp = sum(
-                        1
-                        for target, pred in zip(targets, predictions, strict=True)
-                        if target != unknown_idx and pred == unknown_idx
-                    )
-                    unknown_fn = sum(
-                        1
-                        for target, pred in zip(targets, predictions, strict=True)
-                        if target == unknown_idx and pred != unknown_idx
-                    )
-                    silence_tp = sum(
-                        1
-                        for target, pred in zip(targets, predictions, strict=True)
-                        if target == silence_idx and pred == silence_idx
-                    )
-                    silence_fp = sum(
-                        1
-                        for target, pred in zip(targets, predictions, strict=True)
-                        if target != silence_idx and pred == silence_idx
-                    )
-                    silence_fn = sum(
-                        1
-                        for target, pred in zip(targets, predictions, strict=True)
-                        if target == silence_idx and pred != silence_idx
-                    )
-                    unknown_precision = (
-                        unknown_tp / (unknown_tp + unknown_fp) if (unknown_tp + unknown_fp) else 0.0
-                    )
-                    unknown_recall = (
-                        unknown_tp / (unknown_tp + unknown_fn) if (unknown_tp + unknown_fn) else 0.0
-                    )
-                    silence_precision = (
-                        silence_tp / (silence_tp + silence_fp) if (silence_tp + silence_fp) else 0.0
-                    )
-                    silence_recall = (
-                        silence_tp / (silence_tp + silence_fn) if (silence_tp + silence_fn) else 0.0
-                    )
-                    unknown_f1 = (
-                        2.0
-                        * unknown_precision
-                        * unknown_recall
-                        / (unknown_precision + unknown_recall)
-                        if (unknown_precision + unknown_recall)
-                        else 0.0
-                    )
-                    silence_f1 = (
-                        2.0
-                        * silence_precision
-                        * silence_recall
-                        / (silence_precision + silence_recall)
-                        if (silence_precision + silence_recall)
-                        else 0.0
-                    )
-                    results.append(
-                        {
-                            "method": method,
-                            "seed": seed,
-                            "subset": list(subset),
-                            "subset_size": len(subset),
-                            "macro_f1_nc": (unknown_f1 + silence_f1) / 2.0,
-                            "unknown_f1": unknown_f1,
-                            "silence_f1": silence_f1,
-                            "eval_split": "test",
-                        }
-                    )
+
+            artifact_by_backbone = {
+                backbone_id: test_prediction_artifacts[phase_four_trial_id]
+                for backbone_id, phase_four_trial_id in by_backbone.items()
+                if phase_four_trial_id in test_prediction_artifacts
+            }
+            payload_by_backbone = self._load_prediction_payloads(artifact_by_backbone, ordered_ids)
+            results.extend(
+                self._build_ensemble_rows(
+                    method,
+                    seed,
+                    ordered_ids,
+                    payload_by_backbone,
+                    eval_split="test",
+                )
+            )
         return results
 
     def _select_winners(
@@ -993,6 +745,42 @@ class PhaseFourSweepRunner:
         if not completed_ids:
             return [], {}
 
+        if self.selected_test_eval_path.exists():
+            try:
+                cached_payload = _read_json(self.selected_test_eval_path)
+            except (json.JSONDecodeError, OSError):
+                cached_payload = {}
+
+            if isinstance(cached_payload, dict):
+                cached_ids_raw = cached_payload.get("completed_trial_ids")
+                cached_results = cached_payload.get("results")
+                cached_artifacts_raw = cached_payload.get("test_prediction_artifacts")
+                cached_ids = (
+                    sorted(str(item) for item in cached_ids_raw)
+                    if isinstance(cached_ids_raw, list)
+                    else None
+                )
+                if cached_ids == completed_ids and isinstance(cached_results, list):
+                    cached_artifacts: dict[str, str] = {}
+                    if isinstance(cached_artifacts_raw, Mapping):
+                        for key, value in cached_artifacts_raw.items():
+                            if isinstance(key, str) and isinstance(value, str) and value:
+                                cached_artifacts[key] = value
+                    if not cached_artifacts:
+                        for row in cached_results:
+                            if not isinstance(row, Mapping):
+                                continue
+                            trial_id = row.get("trial_id")
+                            artifact_path = row.get("test_prediction_artifact")
+                            if isinstance(trial_id, str) and isinstance(artifact_path, str):
+                                cached_artifacts[trial_id] = artifact_path
+                    logging.getLogger(__name__).info(
+                        "[phase-4] reusing cached heldout test evaluation for %d completed trials",
+                        len(completed_ids),
+                    )
+                    cached_rows = [dict(row) for row in cached_results if isinstance(row, Mapping)]
+                    return cached_rows, cached_artifacts
+
         results: list[dict[str, Any]] = []
         test_prediction_artifacts: dict[str, str] = {}
 
@@ -1044,6 +832,7 @@ class PhaseFourSweepRunner:
                 "per_class": metrics.get("per_class", {}),
                 "heldout_run_name": run_name,
                 "heldout_state_path": str(child_state_path),
+                "test_prediction_artifact": test_prediction_artifact,
             }
             results.append(result_dict)
 
@@ -1051,6 +840,8 @@ class PhaseFourSweepRunner:
             self.selected_test_eval_path,
             {
                 "schema_version": PHASE_FOUR_STATE_SCHEMA_VERSION,
+                "completed_trial_ids": completed_ids,
+                "test_prediction_artifacts": test_prediction_artifacts,
                 "results": results,
             },
         )

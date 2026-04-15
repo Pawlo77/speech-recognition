@@ -13,6 +13,7 @@ import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,8 @@ import torch
 
 from ..config import ExperimentConfig, MLflowTrackingConfig
 from ..models import DEFAULT_INPUT_BINS, DEFAULT_TARGET_FRAMES, build_model_adapter
+
+_EFFICIENCY_CACHE: dict[str, dict[str, float]] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,7 +106,7 @@ def collect_reproducibility_report() -> ReproducibilityReport:
         torch_version=torch.__version__,
         total_ram_bytes=total_ram_bytes,
         total_disk_bytes=total_disk_bytes,
-        installed_packages=_collect_installed_packages(),
+        installed_packages=_cached_installed_packages(),
         git_commit_hash=git_commit_hash,
         git_branch=git_branch,
         git_dirty=bool(git_status_porcelain.strip()),
@@ -231,12 +234,28 @@ def _collect_installed_packages() -> dict[str, str]:
     return dict(sorted(packages.items(), key=lambda item: item[0].lower()))
 
 
+@lru_cache(maxsize=1)
+def _cached_installed_packages() -> dict[str, str]:
+    """Return a cached package-version snapshot for the active environment."""
+
+    return _collect_installed_packages()
+
+
 def _resolve_tracking_uri(tracking_uri: str) -> str:
     """Resolve local tracking URIs to an absolute path when needed."""
 
+    if tracking_uri.startswith("sqlite:///"):
+        db_path = Path(tracking_uri.removeprefix("sqlite:///"))
+        resolved_db_path = db_path.expanduser().resolve()
+        resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
+        return f"sqlite:///{resolved_db_path.as_posix()}"
+
     if "://" in tracking_uri and not tracking_uri.startswith("file:"):
         return tracking_uri
-    return str(Path(tracking_uri).expanduser().resolve())
+
+    resolved_path = Path(tracking_uri).expanduser().resolve()
+    resolved_path.mkdir(parents=True, exist_ok=True)
+    return str(resolved_path)
 
 
 def _flatten_params(prefix: str, value: Any) -> dict[str, str]:
@@ -280,6 +299,8 @@ class MlflowRunTracker:
     """Whether MLflow run is currently active."""
     _logged_checkpoint_paths: set[str] = field(default_factory=set, init=False, repr=False)
     """Checkpoint artifact paths already logged for this run."""
+    _latest_checkpoint_tag_value: str | None = field(default=None, init=False, repr=False)
+    """Last checkpoint path tag value sent to MLflow."""
 
     def start(self) -> None:
         """Start a run and log static hyperparameters and efficiency metrics."""
@@ -290,7 +311,6 @@ class MlflowRunTracker:
         try:
             mlflow = importlib.import_module("mlflow")
             tracking_uri = _resolve_tracking_uri(self.tracking.tracking_uri)
-            Path(tracking_uri).mkdir(parents=True, exist_ok=True)
             with warnings.catch_warnings():
                 warnings.filterwarnings(
                     "ignore",
@@ -306,27 +326,34 @@ class MlflowRunTracker:
             if self.tracking.log_params:
                 mlflow.log_params(_flatten_params("", self.experiment_config.to_dict()))
 
-            fvcore_logger = logging.getLogger("fvcore.nn.jit_analysis")
-            previous_level = fvcore_logger.level
-            fvcore_logger.setLevel(logging.ERROR)
-            try:
-                with warnings.catch_warnings():
-                    warnings.filterwarnings(
-                        "ignore",
-                        message="`torch.jit.script` is deprecated.*",
-                        category=DeprecationWarning,
-                    )
-                    efficiency = self.model_adapter.profile_efficiency(
-                        torch.randn(
-                            1,
-                            1,
-                            DEFAULT_INPUT_BINS,
-                            DEFAULT_TARGET_FRAMES,
-                            dtype=torch.float32,
+            efficiency_key = json.dumps(self.experiment_config.model.to_dict(), sort_keys=True)
+            efficiency = _EFFICIENCY_CACHE.get(efficiency_key)
+            if efficiency is None:
+                fvcore_logger = logging.getLogger("fvcore.nn.jit_analysis")
+                previous_level = fvcore_logger.level
+                fvcore_logger.setLevel(logging.ERROR)
+                try:
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings(
+                            "ignore",
+                            message="`torch.jit.script` is deprecated.*",
+                            category=DeprecationWarning,
                         )
-                    )
-            finally:
-                fvcore_logger.setLevel(previous_level)
+                        efficiency = self.model_adapter.profile_efficiency(
+                            torch.randn(
+                                1,
+                                1,
+                                DEFAULT_INPUT_BINS,
+                                DEFAULT_TARGET_FRAMES,
+                                dtype=torch.float32,
+                            )
+                        )
+                finally:
+                    fvcore_logger.setLevel(previous_level)
+                _EFFICIENCY_CACHE[efficiency_key] = {
+                    "model_parameters_total": float(efficiency["model_parameters_total"]),
+                    "model_macs_1sec": float(efficiency["model_macs_1sec"]),
+                }
 
             if self.tracking.log_metrics:
                 mlflow.log_metrics(
@@ -393,6 +420,16 @@ class MlflowRunTracker:
         if not self._run_active or self._mlflow is None:
             return
 
+        if (
+            loss is None
+            and validation_macro_f1 is None
+            and checkpoint_path is None
+            and epoch is None
+            and step is None
+            and not extra_metrics
+        ):
+            return
+
         metrics: dict[str, float] = {}
         if loss is not None:
             metrics["loss"] = float(loss)
@@ -404,15 +441,18 @@ class MlflowRunTracker:
         if self.tracking.log_metrics and metrics:
             self._mlflow.log_metrics(metrics, step=step)
 
-        if epoch is not None:
+        if self.tracking.log_metrics and epoch is not None:
             self._mlflow.log_metric("epoch", float(epoch), step=step)
-        if step is not None:
+        if self.tracking.log_metrics and step is not None:
             self._mlflow.log_metric("step", float(step), step=step)
 
         if checkpoint_path is not None:
             checkpoint = Path(checkpoint_path)
             # Use a mutable tag for "latest" pointer; params are immutable in MLflow.
-            self._mlflow.set_tag("latest_checkpoint_path", str(checkpoint))
+            checkpoint_key = str(checkpoint)
+            if checkpoint_key != self._latest_checkpoint_tag_value:
+                self._mlflow.set_tag("latest_checkpoint_path", checkpoint_key)
+                self._latest_checkpoint_tag_value = checkpoint_key
             checkpoint_key = str(checkpoint)
             if (
                 self.tracking.log_artifacts
@@ -462,6 +502,7 @@ class MlflowRunTracker:
                 self._run_active = False
                 self._mlflow = None
                 self._logged_checkpoint_paths.clear()
+                self._latest_checkpoint_tag_value = None
 
 
 def build_mlflow_tracker(experiment_config: ExperimentConfig, run_name: str) -> MlflowRunTracker:

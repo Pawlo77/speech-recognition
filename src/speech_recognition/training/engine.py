@@ -95,6 +95,8 @@ class TrainingEngine:
     """Training hyperparameter configuration."""
     checkpoint_dir: Path
     """Directory for storing training checkpoints."""
+    keep_last_n: int = 2
+    """Number of recent checkpoints to retain on disk."""
     device: torch.device = field(default_factory=lambda: select_training_device())
     """Device for training (MPS, CUDA, or CPU)."""
     use_mixed_precision: bool | None = None
@@ -103,6 +105,8 @@ class TrainingEngine:
     """Loss function for training."""
 
     def __post_init__(self) -> None:
+        if self.keep_last_n < 1:
+            raise ValueError("keep_last_n must be at least 1.")
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.model.to(self.device)
         # Keep loss buffers (e.g. class weights) on the same device as logits/targets.
@@ -161,6 +165,31 @@ class TrainingEngine:
 
         return self.checkpoint_dir / f"checkpoint_step_{step:010d}.pt"
 
+    def _sorted_checkpoint_paths(self) -> list[Path]:
+        """Return valid checkpoint paths sorted by step number ascending."""
+
+        def _step(path: Path) -> int:
+            match = _CHECKPOINT_PATTERN.match(path.stem)
+            return int(match.group(1)) if match else -1
+
+        candidates = [
+            path
+            for path in self.checkpoint_dir.glob("checkpoint_step_*.pt")
+            if _CHECKPOINT_PATTERN.match(path.stem)
+        ]
+        return sorted(candidates, key=_step)
+
+    def _prune_old_checkpoints(self) -> None:
+        """Delete old checkpoint files, keeping only the most recent N files."""
+
+        checkpoints = self._sorted_checkpoint_paths()
+        excess = len(checkpoints) - self.keep_last_n
+        if excess <= 0:
+            return
+        for path in checkpoints[:excess]:
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink()
+
     def _atomic_torch_save(self, payload: Mapping[str, Any], path: Path) -> None:
         """Persist a checkpoint atomically via a temporary file."""
 
@@ -183,6 +212,7 @@ class TrainingEngine:
         )
         checkpoint_path = self._checkpoint_path(step)
         self._atomic_torch_save(checkpoint.to_dict(), checkpoint_path)
+        self._prune_old_checkpoints()
         return checkpoint_path
 
     def _load_checkpoint_payload(self, path: Path) -> TrainingCheckpoint:
@@ -283,6 +313,7 @@ class TrainingEngine:
             _ = len(val_loader)
 
         logger = logging.getLogger(__name__)
+        checkpoint_interval = max(1, self.training_config.log_every_n_steps)
 
         steps_per_epoch = len(train_loader)
         if steps_per_epoch <= 0:
@@ -324,10 +355,30 @@ class TrainingEngine:
                         continue
                     loss_value = self._train_batch(batch)
                     global_step += 1
-                    if (
+                    should_log_step = (
                         self.training_config.log_every_n_steps > 0
                         and global_step % self.training_config.log_every_n_steps == 0
+                    )
+                    if (
+                        should_log_step
+                        and tracker is not None
+                        and hasattr(tracker, "log_training_metrics")
                     ):
+                        try:
+                            learning_rate = (
+                                float(self.optimizer.param_groups[0].get("lr", 0.0))
+                                if self.optimizer.param_groups
+                                else 0.0
+                            )
+                            tracker.log_training_metrics(
+                                loss=loss_value,
+                                epoch=epoch + 1,
+                                step=global_step,
+                                extra_metrics={"learning_rate": learning_rate},
+                            )
+                        except Exception:
+                            logger.exception("tracker.log_training_metrics failed")
+                    if should_log_step:
                         logger.info(
                             "[train] epoch=%d/%d step=%d loss=%.6f",
                             epoch + 1,
@@ -335,15 +386,9 @@ class TrainingEngine:
                             global_step,
                             loss_value,
                         )
-                        if tracker is not None and hasattr(tracker, "log_training_metrics"):
-                            try:
-                                tracker.log_training_metrics(
-                                    loss=loss_value, epoch=epoch + 1, step=global_step
-                                )
-                            except Exception:
-                                logger.exception("tracker.log_training_metrics failed")
 
-                    last_checkpoint_path = self.save_checkpoint(epoch=epoch, step=global_step)
+                    if global_step % checkpoint_interval == 0:
+                        last_checkpoint_path = self.save_checkpoint(epoch=epoch, step=global_step)
                     if max_train_steps is not None and global_step >= max_train_steps:
                         logger.info(
                             (

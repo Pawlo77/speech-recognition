@@ -7,10 +7,13 @@ export PYTHONPATH=.
 export PYTORCH_ENABLE_MPS_FALLBACK=1
 export OMP_NUM_THREADS=1
 
-.PHONY: help install clean test pre-commit pre-commit-all datasets phase-1 phase-2 phase-3 phase-4 status full-pipeline full-pipeline-check eta-estimate estimate-ram mlflow
+.PHONY: help install clean test pre-commit pre-commit-all datasets phase-1 phase-2 phase-3 phase-4 status full-pipeline full-pipeline-check eta-estimate estimate-ram mlflow mlflow-stop
 
 RUN_ROOT ?= outputs/full-pipeline-check
 BATCH_SIZES ?= 1 8 32
+MLFLOW_HOST ?= 127.0.0.1
+MLFLOW_PORT ?= 5005
+MLFLOW_WORKERS ?= 1
 
 ############################
 # Repo Maintenance Targets #
@@ -35,6 +38,7 @@ help:
 	@echo "  make eta-estimate           - Estimate full-pipeline ETA from saved state files"
 	@echo "  make estimate-ram           - Estimate RAM footprint by model family"
 	@echo "  make mlflow                 - Launch MLflow UI for local runs"
+	@echo "  make mlflow-stop            - Stop local MLflow UI processes"
 
 # install dependencies and pre-commit hooks
 install:
@@ -94,6 +98,8 @@ full-pipeline:
 full-pipeline-check:
 	@set -eu; \
 	set -o pipefail; \
+	mkdir -p outputs report/build_latex; \
+	touch outputs/.metadata_never_index report/build_latex/.metadata_never_index; \
 	RUN_TS="$$(date +%Y%m%d_%H%M%S)"; \
 	RUN_ROOT="outputs/full-pipeline-check"; \
 	LOG_DIR="$$RUN_ROOT/logs/$$RUN_TS"; \
@@ -101,22 +107,22 @@ full-pipeline-check:
 	export TQDM_DISABLE=1; \
 	echo "Full pipeline check logs: $$LOG_DIR"; \
 	phase_1_start="$$(date +%s)"; \
-	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-1 --set training.batch_size=4 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-1.log"; \
+	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-1 --set training.batch_size=4 --set training.log_every_n_steps=1 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-1.log"; \
 	phase_1_end="$$(date +%s)"; \
 	phase_1_secs="$$((phase_1_end - phase_1_start))"; \
 	echo "phase-1 duration: $${phase_1_secs}s"; \
 	phase_2_start="$$(date +%s)"; \
-	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-2 --set training.batch_size=4 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-2.log"; \
+	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-2 --set training.batch_size=4 --set training.log_every_n_steps=1 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-2.log"; \
 	phase_2_end="$$(date +%s)"; \
 	phase_2_secs="$$((phase_2_end - phase_2_start))"; \
 	echo "phase-2 duration: $${phase_2_secs}s"; \
 	phase_3_start="$$(date +%s)"; \
-	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-3 --set training.batch_size=4 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-3.log"; \
+	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-3 --set training.batch_size=4 --set training.log_every_n_steps=1 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-3.log"; \
 	phase_3_end="$$(date +%s)"; \
 	phase_3_secs="$$((phase_3_end - phase_3_start))"; \
 	echo "phase-3 duration: $${phase_3_secs}s"; \
 	phase_4_start="$$(date +%s)"; \
-	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-4 --set training.batch_size=4 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-4.log"; \
+	SPEECH_SWEEP_SEED=0 SPEECH_TRAIN_MAX_STEPS=3 uv run speech-recognition phase-4 --set training.batch_size=4 --set training.log_every_n_steps=1 --output-dir "$$RUN_ROOT" --run-name smoke 2>&1 | tee "$$LOG_DIR/phase-4.log"; \
 	phase_4_end="$$(date +%s)"; \
 	phase_4_secs="$$((phase_4_end - phase_4_start))"; \
 	echo "phase-4 duration: $${phase_4_secs}s"; \
@@ -135,7 +141,45 @@ full-pipeline-check:
 
 # Launch MLflow UI for local runs
 mlflow:
-	uv run mlflow ui --backend-store-uri mlruns
+	@PORT="$(MLFLOW_PORT)"; \
+	if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$$PORT" -sTCP:LISTEN >/dev/null 2>&1; then \
+		echo "Port $$PORT is already in use. Run 'make mlflow-stop' or use another port: make mlflow MLFLOW_PORT=5001"; \
+		lsof -nP -iTCP:"$$PORT" -sTCP:LISTEN; \
+		exit 1; \
+	fi; \
+	uv run mlflow ui --backend-store-uri sqlite:///mlruns.db --default-artifact-root ./mlruns --host "$(MLFLOW_HOST)" --port "$$PORT" --workers "$(MLFLOW_WORKERS)"
+
+# Stop local MLflow UI processes
+mlflow-stop:
+	@PORT="$(MLFLOW_PORT)"; \
+	PIDS="$$( ( \
+		pgrep -f 'mlflow.server.fastapi_app' || true; \
+		pgrep -f 'python -m mlflow' || true; \
+		pgrep -f 'mlflow ui' || true; \
+		pgrep -f 'mlflow server' || true \
+	) | sort -u )"; \
+	if [ -z "$$PIDS" ] && command -v lsof >/dev/null 2>&1; then \
+		PORT_PIDS="$$(lsof -tiTCP:"$$PORT" -sTCP:LISTEN 2>/dev/null || true)"; \
+		if [ -n "$$PORT_PIDS" ]; then \
+			for PID in $$PORT_PIDS; do \
+				ARGS="$$(ps -p $$PID -o args= 2>/dev/null || true)"; \
+				case "$$ARGS" in \
+					*mlflow*|*fastapi_app:app*) PIDS="$$PIDS $$PID" ;; \
+				esac; \
+			done; \
+			PIDS="$$(printf '%s\n' $$PIDS | awk 'NF' | sort -u | tr '\n' ' ')"; \
+		fi; \
+	fi; \
+	if [ -n "$$PIDS" ]; then \
+		echo "Stopping MLflow UI processes: $$PIDS"; \
+		kill $$PIDS; \
+	else \
+		echo "No MLflow UI process found."; \
+		if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$$PORT" -sTCP:LISTEN >/dev/null 2>&1; then \
+			echo "Note: port $$PORT is occupied by a non-MLflow process:"; \
+			lsof -nP -iTCP:"$$PORT" -sTCP:LISTEN; \
+		fi; \
+	fi
 
 # Estimate full-pipeline ETA from saved phase state files.
 eta-estimate:

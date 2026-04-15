@@ -162,8 +162,11 @@ Local MLflow runs are stored under `mlruns/` by default. Launch the UI with:
 ```bash
 make mlflow
 
+# use a different port if 5000 is occupied
+make mlflow MLFLOW_PORT=5001
+
 # equivalent direct command
-mlflow ui --backend-store-uri mlruns
+mlflow ui --backend-store-uri sqlite:///mlruns.db --default-artifact-root ./mlruns
 
 # equivalent CLI entry point
 speech-recognition mlflow-ui

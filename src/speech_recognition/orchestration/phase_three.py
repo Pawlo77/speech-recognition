@@ -2,12 +2,10 @@
 
 import json
 import logging
-import os
 import subprocess
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +15,13 @@ from ..config import DEFAULT_SEEDS, ExperimentConfig, ModelConfig
 from .phase_one import _atomic_write_json, _feature_pipeline_for_trial, _read_json, _serialize
 from .phase_two import _phase_two_feature_config, _scheduler_config_for_trial
 from .services import build_isolated_subprocess_env
+from .sweep_utils import (
+    apply_trial_cap,
+    iter_nested_payloads,
+    summary_from_completed_process,
+    sweep_seeds,
+    utc_now,
+)
 
 PHASE_THREE_STATE_SCHEMA_VERSION: int = 1
 """Schema version for the phase-3 sweep state file."""
@@ -90,38 +95,15 @@ PHASE_THREE_MLP_MIXER_DROPOUTS: tuple[float, float] = (0.0, 0.2)
 PHASE_THREE_MLP_MIXER_HEAD_L2_NORM: tuple[bool, bool] = (True, False)
 """MLP-Mixer L2-normalized head configurations to sweep."""
 
-_SWEEP_MAX_TRIALS_ENV = "SPEECH_SWEEP_MAX_TRIALS"
-_SWEEP_SEED_ENV = "SPEECH_SWEEP_SEED"
-
 
 def _apply_trial_cap(trials: tuple[Any, ...]) -> tuple[Any, ...]:
-    """Return a capped trial tuple when a smoke-limit env override is set."""
-
-    raw_limit = os.environ.get(_SWEEP_MAX_TRIALS_ENV)
-    if raw_limit in {None, ""}:
-        return trials
-    try:
-        limit = int(raw_limit)
-    except ValueError as exc:
-        raise ValueError(f"{_SWEEP_MAX_TRIALS_ENV} must be an integer.") from exc
-    if limit <= 0:
-        raise ValueError(f"{_SWEEP_MAX_TRIALS_ENV} must be greater than zero.")
-    return trials[:limit]
+    return apply_trial_cap(trials)
 
 
 def _sweep_seeds() -> tuple[int, ...]:
     """Return default seeds or a single-seed override for smoke runs."""
 
-    raw_seed = os.environ.get(_SWEEP_SEED_ENV)
-    if raw_seed in {None, ""}:
-        return PHASE_THREE_SEEDS
-    try:
-        seed = int(raw_seed)
-    except ValueError as exc:
-        raise ValueError(f"{_SWEEP_SEED_ENV} must be an integer.") from exc
-    if seed not in PHASE_THREE_SEEDS:
-        raise ValueError(f"{_SWEEP_SEED_ENV} must be one of {PHASE_THREE_SEEDS}.")
-    return (seed,)
+    return sweep_seeds(PHASE_THREE_SEEDS)
 
 
 def _phase_three_group_key(record: "PhaseThreeTrialRecord") -> tuple[str, str]:
@@ -164,84 +146,49 @@ def _phase_three_group_stats(
 
 
 def _utc_now() -> str:
-    """Return the current UTC timestamp as an ISO-8601 string."""
-
-    return datetime.now(UTC).isoformat()
+    return utc_now()
 
 
 def _phase_three_score(payload: Mapping[str, Any]) -> float:
     """Extract the validation macro-F1 score from a child payload."""
 
-    if not isinstance(payload, Mapping):
-        return 0.0
+    for nested_payload in iter_nested_payloads(payload):
+        score = nested_payload.get("validation_macro_f1")
+        if isinstance(score, int | float):
+            return float(score)
 
-    score = payload.get("validation_macro_f1")
-    if isinstance(score, int | float):
-        return float(score)
-
-    metrics = payload.get("metrics")
-    if isinstance(metrics, Mapping):
-        metric_value = metrics.get("validation_macro_f1", metrics.get("macro_f1"))
-        if isinstance(metric_value, int | float):
-            return float(metric_value)
-
-    phase_artifacts = payload.get("phase_artifacts")
-    if isinstance(phase_artifacts, Mapping):
-        for artifact in phase_artifacts.values():
-            if isinstance(artifact, Mapping):
-                output_data = artifact.get("output_data")
-                if isinstance(output_data, Mapping):
-                    score = _phase_three_score(output_data)
-                    if score > 0.0:
-                        return score
+        metrics = nested_payload.get("metrics")
+        if isinstance(metrics, Mapping):
+            metric_value = metrics.get("validation_macro_f1", metrics.get("macro_f1"))
+            if isinstance(metric_value, int | float):
+                return float(metric_value)
     return 0.0
 
 
 def _phase_three_core_command_score(payload: Mapping[str, Any]) -> float | None:
     """Extract core-command macro-F1 from a child payload when available."""
 
-    if not isinstance(payload, Mapping):
-        return None
+    for nested_payload in iter_nested_payloads(payload):
+        direct = nested_payload.get("core_command_macro_f1")
+        if isinstance(direct, int | float):
+            return float(direct)
 
-    direct = payload.get("core_command_macro_f1")
-    if isinstance(direct, int | float):
-        return float(direct)
-
-    metrics = payload.get("metrics")
-    if isinstance(metrics, Mapping):
-        metric_value = metrics.get("core_command_macro_f1")
-        if isinstance(metric_value, int | float):
-            return float(metric_value)
-
-    phase_artifacts = payload.get("phase_artifacts")
-    if isinstance(phase_artifacts, Mapping):
-        for artifact in phase_artifacts.values():
-            if isinstance(artifact, Mapping):
-                output_data = artifact.get("output_data")
-                if isinstance(output_data, Mapping):
-                    score = _phase_three_core_command_score(output_data)
-                    if score is not None:
-                        return score
+        metrics = nested_payload.get("metrics")
+        if isinstance(metrics, Mapping):
+            metric_value = metrics.get("core_command_macro_f1")
+            if isinstance(metric_value, int | float):
+                return float(metric_value)
     return None
 
 
 def _summary_from_completed_process(
     child_state_path: Path, completed_process: subprocess.CompletedProcess[str]
 ) -> dict[str, Any]:
-    """Load child summary from state file first, then subprocess JSON stdout."""
-
-    if child_state_path.exists():
-        try:
-            payload = _read_json(child_state_path)
-            if isinstance(payload, dict):
-                return payload
-        except (json.JSONDecodeError, OSError):
-            pass
-    try:
-        payload = json.loads(completed_process.stdout or "{}")
-    except json.JSONDecodeError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    return summary_from_completed_process(
+        child_state_path,
+        completed_process,
+        read_json=_read_json,
+    )
 
 
 def _phase_three_trial_metadata(trial: Mapping[str, Any]) -> dict[str, Any]:
@@ -399,10 +346,10 @@ class PhaseThreeTrialSpec:
         raise ValueError(f"Unsupported phase-3 model family '{family}'.")
 
 
-def _build_ast_trials() -> tuple[PhaseThreeTrialSpec, ...]:
+def _build_ast_trials(seeds: tuple[int, ...]) -> tuple[PhaseThreeTrialSpec, ...]:
     trials: list[PhaseThreeTrialSpec] = []
     trial_index = 0
-    for seed in _sweep_seeds():
+    for seed in seeds:
         for dropout in PHASE_THREE_AST_DROPOUTS:
             for head in PHASE_THREE_AST_HEADS:
                 for positional_embedding in PHASE_THREE_AST_POSITIONAL_EMBEDDINGS:
@@ -429,10 +376,10 @@ def _build_ast_trials() -> tuple[PhaseThreeTrialSpec, ...]:
     return tuple(trials)
 
 
-def _build_convnext_trials() -> tuple[PhaseThreeTrialSpec, ...]:
+def _build_convnext_trials(seeds: tuple[int, ...]) -> tuple[PhaseThreeTrialSpec, ...]:
     trials: list[PhaseThreeTrialSpec] = []
     trial_index = 0
-    for seed in _sweep_seeds():
+    for seed in seeds:
         for stochastic_depth in PHASE_THREE_CONVNEXT_STOCH_DEPTHS:
             for kernel_size in PHASE_THREE_CONVNEXT_KERNEL_SIZES:
                 trial_index += 1
@@ -453,10 +400,10 @@ def _build_convnext_trials() -> tuple[PhaseThreeTrialSpec, ...]:
     return tuple(trials)
 
 
-def _build_ssamba_trials() -> tuple[PhaseThreeTrialSpec, ...]:
+def _build_ssamba_trials(seeds: tuple[int, ...]) -> tuple[PhaseThreeTrialSpec, ...]:
     trials: list[PhaseThreeTrialSpec] = []
     trial_index = 0
-    for seed in _sweep_seeds():
+    for seed in seeds:
         for pooling in PHASE_THREE_SSAMBA_POOLINGS:
             for use_cls in PHASE_THREE_SSAMBA_CLS:
                 for stride_ms in PHASE_THREE_SSAMBA_STRIDES_MS:
@@ -483,10 +430,10 @@ def _build_ssamba_trials() -> tuple[PhaseThreeTrialSpec, ...]:
     return tuple(trials)
 
 
-def _build_xlstm_trials() -> tuple[PhaseThreeTrialSpec, ...]:
+def _build_xlstm_trials(seeds: tuple[int, ...]) -> tuple[PhaseThreeTrialSpec, ...]:
     trials: list[PhaseThreeTrialSpec] = []
     trial_index = 0
-    for seed in _sweep_seeds():
+    for seed in seeds:
         for dimension in PHASE_THREE_XLSTM_DIMS:
             for state_reset in PHASE_THREE_XLSTM_STATE_RESETS:
                 for output_mode in PHASE_THREE_XLSTM_OUTPUTS:
@@ -510,10 +457,10 @@ def _build_xlstm_trials() -> tuple[PhaseThreeTrialSpec, ...]:
     return tuple(trials)
 
 
-def _build_mlp_mixer_trials() -> tuple[PhaseThreeTrialSpec, ...]:
+def _build_mlp_mixer_trials(seeds: tuple[int, ...]) -> tuple[PhaseThreeTrialSpec, ...]:
     trials: list[PhaseThreeTrialSpec] = []
     trial_index = 0
-    for seed in _sweep_seeds():
+    for seed in seeds:
         for dropout in PHASE_THREE_MLP_MIXER_DROPOUTS:
             for head_l2_norm in PHASE_THREE_MLP_MIXER_HEAD_L2_NORM:
                 trial_index += 1
@@ -537,12 +484,13 @@ def _build_mlp_mixer_trials() -> tuple[PhaseThreeTrialSpec, ...]:
 def build_phase_three_trials() -> tuple[PhaseThreeTrialSpec, ...]:
     """Return the 90 trial specifications for phase 3."""
 
+    seeds = _sweep_seeds()
     return (
-        *_build_ast_trials(),
-        *_build_convnext_trials(),
-        *_build_ssamba_trials(),
-        *_build_xlstm_trials(),
-        *_build_mlp_mixer_trials(),
+        *_build_ast_trials(seeds),
+        *_build_convnext_trials(seeds),
+        *_build_ssamba_trials(seeds),
+        *_build_xlstm_trials(seeds),
+        *_build_mlp_mixer_trials(seeds),
     )
 
 
