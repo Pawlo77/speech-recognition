@@ -275,13 +275,29 @@ class PipelineStateStore:
         client = mlflow.tracking.MlflowClient()
         return mlflow, client
 
-    def _active_mlflow_run_id(self) -> str | None:
-        """Return active MLflow run id from environment if available."""
+    def _active_mlflow_run_id(self, run_name: str | None = None) -> str | None:
+        """Return active MLflow run id from environment when it can be validated."""
         run_id = os.environ.get(_ACTIVE_MLFLOW_RUN_ID_ENV)
         if run_id is None:
             return None
         stripped = run_id.strip()
-        return stripped or None
+        if not stripped:
+            return None
+        if run_name is None:
+            return stripped
+
+        try:
+            _, client = self._mlflow_modules()
+            get_run = getattr(client, "get_run", None)
+            if not callable(get_run):
+                return None
+            run = get_run(stripped)
+            tags = getattr(getattr(run, "data", None), "tags", {}) or {}
+            if tags.get("pipeline.run_name") != run_name:
+                return None
+            return stripped
+        except Exception:
+            return None
 
     def _find_mlflow_run_id(self, run_name: str) -> str:
         """Find the latest MLflow run id matching a pipeline run name."""
@@ -307,22 +323,74 @@ class PipelineStateStore:
             )
         return runs[0].info.run_id
 
+    def _find_or_create_mlflow_run_id(self, run_name: str) -> str:
+        """Find or create an MLflow run used for pipeline state persistence."""
+        _, client = self._mlflow_modules()
+        experiment_name = self.experiment_name or "speech-recognition"
+        experiment = client.get_experiment_by_name(experiment_name)
+        if experiment is None:
+            try:
+                experiment_id = client.create_experiment(experiment_name)
+            except Exception:
+                experiment = client.get_experiment_by_name(experiment_name)
+                if experiment is None:
+                    raise
+                experiment_id = experiment.experiment_id
+        else:
+            experiment_id = experiment.experiment_id
+
+        safe_run_name = run_name.replace("'", "\\'")
+        runs = client.search_runs(
+            [experiment_id],
+            filter_string=f"tags.pipeline.run_name = '{safe_run_name}'",
+            order_by=["attributes.start_time DESC"],
+            max_results=1,
+        )
+        if runs:
+            return runs[0].info.run_id
+
+        created_run = client.create_run(
+            experiment_id=experiment_id,
+            tags={
+                "pipeline.run_name": run_name,
+                "mlflow.runName": run_name,
+                "pipeline.run_role": "pipeline-state",
+            },
+        )
+        return created_run.info.run_id
+
     def _mlflow_log_json(
         self, artifact_path: str, payload: Mapping[str, Any], run_name: str
     ) -> None:
         """Log a JSON payload into MLflow artifacts."""
         mlflow, client = self._mlflow_modules()
-        active_run_id = self._active_mlflow_run_id()
+        active_run_id = self._active_mlflow_run_id(run_name=run_name)
 
         if active_run_id is not None:
             log_dict = getattr(mlflow, "log_dict", None)
             if callable(log_dict):
                 log_dict(dict(payload), artifact_path)
                 return
-            mlflow.log_text(json.dumps(payload, indent=2, sort_keys=True), artifact_path)
+            log_text = getattr(mlflow, "log_text", None)
+            if callable(log_text):
+                log_text(json.dumps(payload, indent=2, sort_keys=True), artifact_path)
+                return
+
+            with tempfile.TemporaryDirectory() as temporary_dir:
+                local_name = Path(artifact_path).name
+                local_path = Path(temporary_dir) / local_name
+                local_path.write_text(
+                    json.dumps(payload, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+                client.log_artifact(
+                    active_run_id,
+                    str(local_path),
+                    artifact_path=str(Path(artifact_path).parent),
+                )
             return
 
-        run_id = self._find_mlflow_run_id(run_name)
+        run_id = self._find_or_create_mlflow_run_id(run_name)
         with tempfile.TemporaryDirectory() as temporary_dir:
             local_name = Path(artifact_path).name
             local_path = Path(temporary_dir) / local_name
@@ -365,7 +433,9 @@ class PipelineStateStore:
     def load(self, run_name: str) -> PipelineState:
         """Load state from disk with corruption-tolerant fallback."""
         if self.use_mlflow:
-            run_id = self._active_mlflow_run_id() or self._find_mlflow_run_id(run_name)
+            run_id = self._active_mlflow_run_id(run_name=run_name) or self._find_mlflow_run_id(
+                run_name
+            )
             for phase in reversed(PHASE_ORDER):
                 payload = self._mlflow_load_json(run_id, self._mlflow_phase_state_path(phase))
                 if payload is None:
@@ -481,3 +551,50 @@ class PipelineStateStore:
         _atomic_write_json(
             self.phase_artifact_path(state.run_name, artifact.phase), artifact.to_dict()
         )
+
+
+def save_json_artifact(
+    store: PipelineStateStore,
+    local_path: Path,
+    run_name: str,
+    mlflow_artifact_path: str,
+    payload: Mapping[str, Any],
+) -> None:
+    """Persist a JSON payload locally or to MLflow depending on store configuration."""
+    if store.use_mlflow:
+        store._mlflow_log_json(mlflow_artifact_path, payload, run_name)
+        return
+    _atomic_write_json(local_path, payload)
+
+
+def load_json_artifact(
+    store: PipelineStateStore,
+    local_path: Path,
+    run_name: str,
+    mlflow_artifact_path: str,
+) -> dict[str, Any] | None:
+    """Load a JSON payload locally or from MLflow depending on store configuration."""
+    if store.use_mlflow:
+        try:
+            run_id = store._active_mlflow_run_id() or store._find_mlflow_run_id(run_name)
+        except FileNotFoundError:
+            return None
+        return store._mlflow_load_json(run_id, mlflow_artifact_path)
+
+    if not local_path.exists():
+        return None
+    return _read_json(local_path)
+
+
+def load_json_artifact_or_raise(
+    store: PipelineStateStore,
+    local_path: Path,
+    run_name: str,
+    mlflow_artifact_path: str,
+    description: str,
+) -> dict[str, Any]:
+    """Load a JSON payload or raise FileNotFoundError when it cannot be found."""
+    payload = load_json_artifact(store, local_path, run_name, mlflow_artifact_path)
+    if payload is None:
+        raise FileNotFoundError(description)
+    return payload

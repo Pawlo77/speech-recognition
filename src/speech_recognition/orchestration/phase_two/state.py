@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..phase_one import _serialize
+from ..state import _serialize
 from ..sweep_utils import utc_now
 from .constants import PHASE_TWO_STATE_SCHEMA_VERSION
 from .trials import PhaseTwoTrialRecord

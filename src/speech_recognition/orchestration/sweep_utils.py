@@ -58,6 +58,14 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def build_trial_output_paths(phase_dir: Path, trial_id: str) -> tuple[Path, Path, Path]:
+    """Return the standard trial directory, config path, and child state path."""
+    trial_dir = phase_dir / "runs" / trial_id
+    config_path = trial_dir / "temp_config.json"
+    child_state_path = phase_dir / "runs" / trial_id / "state.json"
+    return trial_dir, config_path, child_state_path
+
+
 def summary_from_completed_process(
     child_state_path: Path,
     completed_process: subprocess.CompletedProcess[str],

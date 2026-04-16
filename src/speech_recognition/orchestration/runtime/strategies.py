@@ -1,6 +1,8 @@
 """Training strategy execution helpers for runtime orchestration."""
 
 import contextlib
+import importlib
+import os
 from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
@@ -14,6 +16,7 @@ from tqdm.auto import tqdm
 from ...config import ExperimentConfig
 from ...features.extractors import WaveformLoader, build_feature_extractor
 from ...models.registry import build_model_adapter
+from ..tracking import _TRACKING_LOGGER, _resolve_tracking_uri
 from .shared import (
     ALL_LABELS,
     COMMAND_LABELS,
@@ -34,8 +37,158 @@ from .shared import (
     _resolve_dataset_root,
     _sampling_weights,
     _set_reproducibility,
+    _shared_two_head_probs_from_logits,
     _start_run_tracker,
 )
+
+_ACTIVE_MLFLOW_RUN_ID_ENV = "SPEECH_MLFLOW_ACTIVE_RUN_ID"
+"""Environment variable name for an active MLflow run ID to exclude from checkpoint restoration."""
+
+
+def _latest_local_checkpoint(checkpoint_dir: Path) -> Path | None:
+    """Return the latest numbered checkpoint in a local directory."""
+    candidates = sorted(checkpoint_dir.glob("checkpoint_step_*.pt"))
+    if not candidates:
+        return None
+    return candidates[-1]
+
+
+def _checkpoint_step_from_artifact_path(path: str) -> int:
+    """Extract checkpoint step from an MLflow artifact path."""
+    name = Path(path).name
+    if not name.startswith("checkpoint_step_") or not name.endswith(".pt"):
+        return -1
+    try:
+        return int(Path(name).stem.removeprefix("checkpoint_step_"))
+    except ValueError:
+        return -1
+
+
+def _collect_artifact_file_paths(client: Any, run_id: str, root: str) -> list[str]:
+    """Collect leaf artifact paths recursively for one root path."""
+    files: list[str] = []
+    stack = [root]
+    while stack:
+        path = stack.pop()
+        try:
+            artifacts = client.list_artifacts(run_id, path)
+        except Exception as exc:
+            _TRACKING_LOGGER.debug(
+                "Failed to list artifacts for run_id=%s path=%s: %s",
+                run_id,
+                path,
+                exc,
+            )
+            continue
+        for artifact in artifacts:
+            if artifact.is_dir:
+                stack.append(artifact.path)
+            else:
+                files.append(artifact.path)
+    return files
+
+
+def _latest_checkpoint_artifact_for_run(
+    client: Any,
+    run: Any,
+    artifact_root: str,
+) -> tuple[str, int] | None:
+    """Return the latest checkpoint artifact path and step for one MLflow run."""
+    run_id = run.info.run_id
+    candidates: list[tuple[str, int]] = []
+
+    tags = getattr(run.data, "tags", {}) or {}
+    tagged_artifact = tags.get("latest_checkpoint_artifact")
+    tagged_step_raw = tags.get("latest_checkpoint_step")
+    tagged_step = None
+    if tagged_step_raw is not None:
+        try:
+            tagged_step = int(tagged_step_raw)
+        except (TypeError, ValueError):
+            tagged_step = None
+
+    if isinstance(tagged_artifact, str):
+        if tagged_step is not None and tagged_step >= 0:
+            return tagged_artifact, tagged_step
+        parsed_tagged_step = _checkpoint_step_from_artifact_path(tagged_artifact)
+        if parsed_tagged_step >= 0:
+            return tagged_artifact, parsed_tagged_step
+
+    for artifact_path in _collect_artifact_file_paths(client, run_id, artifact_root):
+        parsed_step = _checkpoint_step_from_artifact_path(artifact_path)
+        if parsed_step >= 0:
+            candidates.append((artifact_path, parsed_step))
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[1])
+
+
+def _restore_checkpoint_from_mlflow_if_needed(
+    config: ExperimentConfig,
+    run_name: str,
+    checkpoint_dir: Path,
+    artifact_root: str,
+) -> Path | None:
+    """Restore the latest checkpoint artifact when no local checkpoint exists."""
+    local_checkpoint = _latest_local_checkpoint(checkpoint_dir)
+    if local_checkpoint is not None or not config.mlflow.enabled:
+        return local_checkpoint
+
+    try:
+        mlflow = importlib.import_module("mlflow")
+    except Exception:
+        return None
+
+    try:
+        mlflow.set_tracking_uri(_resolve_tracking_uri(config.mlflow.tracking_uri))
+        client = mlflow.tracking.MlflowClient()
+        experiment = client.get_experiment_by_name(config.mlflow.experiment_name)
+        if experiment is None:
+            return None
+
+        safe_run_name = run_name.replace("'", "\\'")
+        runs = client.search_runs(
+            [experiment.experiment_id],
+            filter_string=f"tags.pipeline.run_name = '{safe_run_name}'",
+            order_by=["attributes.start_time DESC"],
+            max_results=50,
+        )
+        if not runs:
+            return None
+
+        active_run_id = os.environ.get(_ACTIVE_MLFLOW_RUN_ID_ENV)
+        for run in runs:
+            run_id = run.info.run_id
+            if active_run_id and run_id == active_run_id:
+                continue
+
+            latest_artifact = _latest_checkpoint_artifact_for_run(client, run, artifact_root)
+            if latest_artifact is None:
+                continue
+            artifact_path, step = latest_artifact
+
+            if step < 0:
+                continue
+
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            destination = checkpoint_dir / f"checkpoint_step_{step:010d}.pt"
+            downloaded = Path(client.download_artifacts(run_id, artifact_path, str(checkpoint_dir)))
+            if downloaded != destination:
+                destination.unlink(missing_ok=True)
+                downloaded.replace(destination)
+
+            _TRACKING_LOGGER.info(
+                "[train] restored checkpoint from MLflow run_id=%s artifact=%s",
+                run_id,
+                artifact_path,
+            )
+            os.environ[_ACTIVE_MLFLOW_RUN_ID_ENV] = run_id
+            return destination
+    except Exception as exc:
+        _TRACKING_LOGGER.warning("Failed to restore checkpoint from MLflow: %s", exc)
+
+    return None
 
 
 def _should_persist_predictions(config: ExperimentConfig, evaluation_split: str) -> bool:
@@ -54,6 +207,64 @@ def _log_prediction_artifact(
     artifact_name = f"predictions/{prediction_filename}"
     tracker.log_named_json_artifact(artifact_name, payload)
     return artifact_name
+
+
+def _prediction_artifact_filename(config: ExperimentConfig, evaluation_split: str) -> str:
+    """Return the prediction artifact filename for the requested split."""
+    return (
+        "test_predictions.json"
+        if evaluation_split == config.dataset.test_split
+        else "validation_predictions.json"
+    )
+
+
+def _make_feature_loader(
+    records: list[AudioRecord],
+    label_to_idx: dict[str, int],
+    config: ExperimentConfig,
+    waveform_loader: WaveformLoader,
+    feature_extractor: torch.nn.Module,
+    *,
+    shuffle: bool,
+    sample_weights: list[float] | None = None,
+    sampled_count: int | None = None,
+) -> FeatureBatchLoader:
+    """Build a FeatureBatchLoader with the common runtime defaults."""
+    return FeatureBatchLoader(
+        records,
+        label_to_idx,
+        batch_size=config.training.batch_size,
+        seed=config.seed,
+        waveform_loader=waveform_loader,
+        feature_extractor=feature_extractor,
+        shuffle=shuffle,
+        sample_weights=sample_weights,
+        sampled_count=sampled_count,
+    )
+
+
+def _build_training_result(
+    *,
+    epoch: int,
+    step: int,
+    checkpoint_path: str | None,
+    validation_macro_f1: float,
+    metrics: dict[str, Any],
+    prediction_artifact: str | None,
+    phase: str,
+    metric_phase: str,
+) -> dict[str, Any]:
+    """Assemble the standard runtime training result payload."""
+    return {
+        "epoch": int(epoch),
+        "step": int(step),
+        "checkpoint_path": checkpoint_path,
+        "validation_macro_f1": float(validation_macro_f1),
+        "metrics": metrics,
+        "metric_phase": metric_phase,
+        "prediction_artifact": prediction_artifact,
+        "phase": phase,
+    }
 
 
 def _compose_two_stage_probs(
@@ -120,7 +331,7 @@ def _execute_two_stage(
     warmup_iterations: int,
 ) -> dict[str, Any]:
     """Train and evaluate a true two-stage detector pipeline."""
-    tracker = _start_run_tracker(config, run_name)
+    tracker: Any | None = None
     try:
         _set_reproducibility(config.seed, config.training.deterministic)
         dataset_root = _resolve_dataset_root(config)
@@ -168,13 +379,12 @@ def _execute_two_stage(
             NON_COMMAND_LABELS[1]: 1,
         }
 
-        gate_train_loader = FeatureBatchLoader(
+        gate_train_loader = _make_feature_loader(
             train_records,
             gate_label_to_idx,
-            batch_size=config.training.batch_size,
-            seed=config.seed,
-            waveform_loader=waveform_loader,
-            feature_extractor=feature_extractor,
+            config,
+            waveform_loader,
+            feature_extractor,
             shuffle=False,
             sample_weights=(
                 _phase_four_weighted_sampling(train_records)
@@ -183,32 +393,29 @@ def _execute_two_stage(
             ),
             sampled_count=len(train_records),
         )
-        gate_val_loader = FeatureBatchLoader(
+        gate_val_loader = _make_feature_loader(
             val_records,
             gate_label_to_idx,
-            batch_size=config.training.batch_size,
-            seed=config.seed,
-            waveform_loader=waveform_loader,
-            feature_extractor=feature_extractor,
+            config,
+            waveform_loader,
+            feature_extractor,
             shuffle=False,
         )
-        gate_eval_loader = FeatureBatchLoader(
+        gate_eval_loader = _make_feature_loader(
             eval_records,
             gate_label_to_idx,
-            batch_size=config.training.batch_size,
-            seed=config.seed,
-            waveform_loader=waveform_loader,
-            feature_extractor=feature_extractor,
+            config,
+            waveform_loader,
+            feature_extractor,
             shuffle=False,
         )
 
-        command_train_loader = FeatureBatchLoader(
+        command_train_loader = _make_feature_loader(
             command_train_records,
             command_label_to_idx,
-            batch_size=config.training.batch_size,
-            seed=config.seed,
-            waveform_loader=waveform_loader,
-            feature_extractor=feature_extractor,
+            config,
+            waveform_loader,
+            feature_extractor,
             shuffle=False,
             sample_weights=(
                 _phase_four_weighted_sampling(command_train_records)
@@ -217,32 +424,29 @@ def _execute_two_stage(
             ),
             sampled_count=len(command_train_records),
         )
-        command_val_loader = FeatureBatchLoader(
+        command_val_loader = _make_feature_loader(
             command_val_records,
             command_label_to_idx,
-            batch_size=config.training.batch_size,
-            seed=config.seed,
-            waveform_loader=waveform_loader,
-            feature_extractor=feature_extractor,
+            config,
+            waveform_loader,
+            feature_extractor,
             shuffle=False,
         )
-        command_eval_loader = FeatureBatchLoader(
+        command_eval_loader = _make_feature_loader(
             eval_records,
             {label: command_label_to_idx.get(label, 0) for label in ALL_LABELS},
-            batch_size=config.training.batch_size,
-            seed=config.seed,
-            waveform_loader=waveform_loader,
-            feature_extractor=feature_extractor,
+            config,
+            waveform_loader,
+            feature_extractor,
             shuffle=False,
         )
 
-        non_command_train_loader = FeatureBatchLoader(
+        non_command_train_loader = _make_feature_loader(
             non_command_train_records,
             non_command_label_to_idx,
-            batch_size=config.training.batch_size,
-            seed=config.seed,
-            waveform_loader=waveform_loader,
-            feature_extractor=feature_extractor,
+            config,
+            waveform_loader,
+            feature_extractor,
             shuffle=False,
             sample_weights=(
                 _phase_four_weighted_sampling(non_command_train_records)
@@ -251,22 +455,20 @@ def _execute_two_stage(
             ),
             sampled_count=len(non_command_train_records),
         )
-        non_command_val_loader = FeatureBatchLoader(
+        non_command_val_loader = _make_feature_loader(
             non_command_val_records,
             non_command_label_to_idx,
-            batch_size=config.training.batch_size,
-            seed=config.seed,
-            waveform_loader=waveform_loader,
-            feature_extractor=feature_extractor,
+            config,
+            waveform_loader,
+            feature_extractor,
             shuffle=False,
         )
-        non_command_eval_loader = FeatureBatchLoader(
+        non_command_eval_loader = _make_feature_loader(
             eval_records,
             {label: non_command_label_to_idx.get(label, 0) for label in ALL_LABELS},
-            batch_size=config.training.batch_size,
-            seed=config.seed,
-            waveform_loader=waveform_loader,
-            feature_extractor=feature_extractor,
+            config,
+            waveform_loader,
+            feature_extractor,
             shuffle=False,
         )
 
@@ -276,13 +478,11 @@ def _execute_two_stage(
             pretrained=config.model.pretrained,
             model_config=replace(config.model, num_classes=2),
         )
-        gate_engine, gate_fit = _fit_model(
+        _restore_checkpoint_from_mlflow_if_needed(
             config=config,
-            model=gate_model,
-            train_loader=gate_train_loader,
-            val_loader=gate_val_loader,
+            run_name=run_name,
             checkpoint_dir=run_dir / "checkpoints" / "gate",
-            tracker=tracker,
+            artifact_root="checkpoints/gate",
         )
 
         command_model = build_model_adapter(
@@ -291,13 +491,11 @@ def _execute_two_stage(
             pretrained=config.model.pretrained,
             model_config=replace(config.model, num_classes=len(COMMAND_LABELS)),
         )
-        command_engine, _ = _fit_model(
+        _restore_checkpoint_from_mlflow_if_needed(
             config=config,
-            model=command_model,
-            train_loader=command_train_loader,
-            val_loader=command_val_loader,
+            run_name=run_name,
             checkpoint_dir=run_dir / "checkpoints" / "command",
-            tracker=tracker,
+            artifact_root="checkpoints/command",
         )
 
         non_command_model = build_model_adapter(
@@ -305,6 +503,30 @@ def _execute_two_stage(
             num_classes=2,
             pretrained=config.model.pretrained,
             model_config=replace(config.model, num_classes=2),
+        )
+        _restore_checkpoint_from_mlflow_if_needed(
+            config=config,
+            run_name=run_name,
+            checkpoint_dir=run_dir / "checkpoints" / "non_command",
+            artifact_root="checkpoints/non_command",
+        )
+
+        tracker = _start_run_tracker(config, run_name)
+        gate_engine, gate_fit = _fit_model(
+            config=config,
+            model=gate_model,
+            train_loader=gate_train_loader,
+            val_loader=gate_val_loader,
+            checkpoint_dir=run_dir / "checkpoints" / "gate",
+            tracker=tracker,
+        )
+        command_engine, _ = _fit_model(
+            config=config,
+            model=command_model,
+            train_loader=command_train_loader,
+            val_loader=command_val_loader,
+            checkpoint_dir=run_dir / "checkpoints" / "command",
+            tracker=tracker,
         )
         non_command_engine, _ = _fit_model(
             config=config,
@@ -404,6 +626,7 @@ def _execute_two_stage(
             "checkpoint_path": gate_fit.get("checkpoint_path"),
             "validation_macro_f1": float(val_metrics["macro_f1"]),
             "metrics": eval_metrics,
+            "metric_phase": ("test" if evaluation_split == config.dataset.test_split else "val"),
             "prediction_artifact": prediction_artifact,
         }
         if tracker is not None:
@@ -422,7 +645,7 @@ def _execute_shared_two_head(
     warmup_iterations: int,
 ) -> dict[str, Any]:
     """Train and evaluate a shared-backbone two-head pipeline."""
-    tracker = _start_run_tracker(config, run_name)
+    tracker: Any | None = None
     try:
         _set_reproducibility(config.seed, config.training.deterministic)
         dataset_root = _resolve_dataset_root(config)
@@ -486,6 +709,14 @@ def _execute_shared_two_head(
             pretrained=config.model.pretrained,
             model_config=config.model,
         )
+        _restore_checkpoint_from_mlflow_if_needed(
+            config=config,
+            run_name=run_name,
+            checkpoint_dir=run_dir / "checkpoints" / "shared_two_head",
+            artifact_root="checkpoints/shared_two_head",
+        )
+
+        tracker = _start_run_tracker(config, run_name)
         engine, fit_payload = _fit_model(
             config=config,
             model=model,
@@ -508,23 +739,7 @@ def _execute_shared_two_head(
                 warmup_iterations=warmup,
             )
             logits = np.array(logits_payload, dtype=np.float32)
-            cmd_logits = logits[:, : len(COMMAND_LABELS)]
-            nc_logits = logits[:, len(COMMAND_LABELS) :]
-            cmd_probs = np.exp(cmd_logits - cmd_logits.max(axis=1, keepdims=True))
-            cmd_probs /= cmd_probs.sum(axis=1, keepdims=True)
-            nc_probs = np.exp(nc_logits - nc_logits.max(axis=1, keepdims=True))
-            nc_probs /= nc_probs.sum(axis=1, keepdims=True)
-
-            cmd_conf = cmd_probs.max(axis=1, keepdims=True)
-            nc_conf = nc_probs.max(axis=1, keepdims=True)
-            denom = np.clip(cmd_conf + nc_conf, a_min=1e-8, a_max=None)
-            cmd_mass = cmd_conf / denom
-            nc_mass = nc_conf / denom
-
-            combined = np.zeros((logits.shape[0], len(ALL_LABELS)), dtype=np.float32)
-            combined[:, : len(COMMAND_LABELS)] = cmd_mass * cmd_probs
-            combined[:, len(COMMAND_LABELS) :] = nc_mass * nc_probs
-            return targets, combined.tolist(), latency_ms
+            return targets, _shared_two_head_probs_from_logits(logits), latency_ms
 
         val_targets, val_probs, _ = _combined_head_probs(val_loader, warmup=0)
         val_metrics = _evaluate_predictions(val_targets, val_probs, "flat_multiclass")
@@ -560,6 +775,7 @@ def _execute_shared_two_head(
             "checkpoint_path": fit_payload.get("checkpoint_path"),
             "validation_macro_f1": float(val_metrics["macro_f1"]),
             "metrics": eval_metrics,
+            "metric_phase": ("test" if evaluation_split == config.dataset.test_split else "val"),
             "prediction_artifact": prediction_artifact,
         }
         if tracker is not None:
@@ -603,7 +819,7 @@ def execute_single_train(
             "phase": config.phase.phase,
         }
 
-    tracker = _start_run_tracker(config, run_name)
+    tracker: Any | None = None
     try:
         _set_reproducibility(config.seed, config.training.deterministic)
         dataset_root = _resolve_dataset_root(config)
@@ -671,6 +887,14 @@ def execute_single_train(
             pretrained=config.model.pretrained,
             model_config=config.model,
         )
+        _restore_checkpoint_from_mlflow_if_needed(
+            config=config,
+            run_name=run_name,
+            checkpoint_dir=run_dir / "checkpoints",
+            artifact_root="checkpoints",
+        )
+
+        tracker = _start_run_tracker(config, run_name)
         engine, fit_payload = _fit_model(
             config=config,
             model=model,
@@ -708,6 +932,7 @@ def execute_single_train(
             "checkpoint_path": fit_payload.get("checkpoint_path"),
             "validation_macro_f1": float(val_metrics["macro_f1"]),
             "metrics": val_metrics,
+            "metric_phase": "val",
             "prediction_artifact": prediction_artifact,
             "phase": config.phase.phase,
         }

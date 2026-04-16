@@ -429,6 +429,8 @@ class TrainingControlConfig:
     """DataLoader worker count."""
     log_every_n_steps: int = 100
     """Logging interval in steps."""
+    checkpoint_every_n_steps: int = 200
+    """Checkpoint interval in steps."""
     validate_every_n_epochs: int = 1
     """Validation interval in epochs."""
     early_stopping_patience: int = 10
@@ -446,6 +448,7 @@ class TrainingControlConfig:
         _require_int("gradient_accumulation_steps", self.gradient_accumulation_steps)
         _require_int("num_workers", self.num_workers, minimum=0)
         _require_int("log_every_n_steps", self.log_every_n_steps)
+        _require_int("checkpoint_every_n_steps", self.checkpoint_every_n_steps)
         _require_int("validate_every_n_epochs", self.validate_every_n_epochs)
         _require_int("early_stopping_patience", self.early_stopping_patience, minimum=0)
         if self.max_grad_norm is not None:
@@ -477,7 +480,7 @@ class CheckpointConfig:
     """Metric used for checkpoint selection."""
     mode: str = "max"
     """Optimization direction for checkpoint selection."""
-    keep_last_n: int = 2
+    keep_last_n: int = 1
     """Number of recent checkpoints to retain."""
 
     def __post_init__(self) -> None:

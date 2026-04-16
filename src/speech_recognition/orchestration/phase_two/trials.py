@@ -5,7 +5,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ...config import ExperimentConfig, SchedulerConfig
-from ..phase_one import _serialize
+from ..state import _serialize
 from ..sweep_utils import sweep_seeds
 from .constants import (
     PHASE_TWO_PROXY_MODELS,

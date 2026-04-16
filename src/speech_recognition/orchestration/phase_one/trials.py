@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ...config import ExperimentConfig, FeaturePipelineConfig
+from ..state import _serialize
 from ..sweep_utils import sweep_seeds
 from .constants import PHASE_ONE_FEATURES, PHASE_ONE_PROXY_MODELS, PHASE_ONE_SEEDS
 
@@ -27,22 +28,6 @@ def _feature_pipeline_for_trial(feature_name: str) -> FeaturePipelineConfig:
     if feature_name == "mel_specaugment":
         return FeaturePipelineConfig(name="mel_specaugment", specaugment=True)
     raise ValueError(f"Unsupported phase-1 feature '{feature_name}'.")
-
-
-def _serialize(value: Any) -> Any:
-    """Convert nested dataclasses and tuples into JSON-friendly values."""
-    if hasattr(value, "__dataclass_fields__"):
-        return {
-            field.name: _serialize(getattr(value, field.name))
-            for field in value.__dataclass_fields__.values()
-        }
-    if isinstance(value, tuple):
-        return [_serialize(item) for item in value]
-    if isinstance(value, list):
-        return [_serialize(item) for item in value]
-    if isinstance(value, Mapping):
-        return {str(key): _serialize(item) for key, item in value.items()}
-    return value
 
 
 @dataclass(frozen=True, slots=True)

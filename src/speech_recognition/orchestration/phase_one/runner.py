@@ -2,7 +2,6 @@
 
 import json
 import logging
-import subprocess
 import sys
 from collections.abc import Mapping
 from importlib import import_module
@@ -13,8 +12,17 @@ from tqdm.auto import tqdm
 
 from ...config import ExperimentConfig
 from ..services import build_isolated_subprocess_env
+from ..state import (
+    PipelineStateStore,
+    _atomic_write_json,
+    _read_json,
+    load_json_artifact,
+    load_json_artifact_or_raise,
+    save_json_artifact,
+)
 from ..sweep_utils import (
     apply_trial_cap,
+    build_trial_output_paths,
     iter_nested_payloads,
     run_subprocess_with_live_output,
     summary_from_completed_process,
@@ -92,19 +100,6 @@ def _select_phase_one_winner(
     return representative.trial_id, best_mean, aggregate
 
 
-def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    """Write JSON atomically via a temporary file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_name(f"{path.name}.tmp")
-    temporary_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    temporary_path.replace(path)
-
-
-def _read_json(path: Path) -> dict[str, Any]:
-    """Load JSON from disk."""
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
 def _trial_score(payload: Mapping[str, Any]) -> float:
     """Extract the validation macro-F1 score from a child payload."""
     for nested_payload in iter_nested_payloads(payload):
@@ -118,16 +113,6 @@ def _trial_score(payload: Mapping[str, Any]) -> float:
             if isinstance(metric_value, int | float):
                 return float(metric_value)
     return 0.0
-
-
-def _summary_from_completed_process(
-    child_state_path: Path, completed_process: subprocess.CompletedProcess[str]
-) -> dict[str, Any]:
-    return summary_from_completed_process(
-        child_state_path,
-        completed_process,
-        read_json=_read_json,
-    )
 
 
 def build_phase_one_command(config_path: Path, run_name: str, output_dir: Path) -> list[str]:
@@ -149,7 +134,13 @@ def build_phase_one_command(config_path: Path, run_name: str, output_dir: Path) 
 class PhaseOneSweepRunner:
     """Run the phase-1 feature ablation sweep using child processes."""
 
-    def __init__(self, output_dir: Path, base_config: ExperimentConfig | None = None) -> None:
+    def __init__(
+        self,
+        output_dir: Path,
+        base_config: ExperimentConfig | None = None,
+        run_name: str = "default",
+        use_mlflow_persistence: bool = False,
+    ) -> None:
         self.output_dir: Path = output_dir
         """Root output directory for all sweep artifacts."""
         self.phase_dir: Path = self.output_dir / "phase_1"
@@ -160,27 +151,70 @@ class PhaseOneSweepRunner:
         """Path to the best feature summary file."""
         self.base_config: ExperimentConfig = base_config or ExperimentConfig()
         """Base experiment config used for all trials."""
+        self.run_name = run_name
+        self.use_mlflow_persistence = use_mlflow_persistence
+        self.state_store = PipelineStateStore(
+            output_dir,
+            use_mlflow=use_mlflow_persistence,
+            tracking_uri=self.base_config.mlflow.tracking_uri,
+            experiment_name=self.base_config.mlflow.experiment_name,
+        )
 
     def load_state(self) -> PhaseOneSweepState:
         """Load the persisted sweep state or create a new one."""
+        if self.use_mlflow_persistence:
+            payload = load_json_artifact(
+                self.state_store,
+                self.state_path,
+                self.run_name,
+                "pipeline_state/phase_1/state.json",
+            )
+            if payload is None:
+                return PhaseOneSweepState.fresh(self.output_dir)
+            return PhaseOneSweepState.from_dict(payload)
+
         if not self.state_path.exists():
             return PhaseOneSweepState.fresh(self.output_dir)
-        return PhaseOneSweepState.from_dict(_read_json(self.state_path))
+        return PhaseOneSweepState.from_dict(
+            load_json_artifact_or_raise(
+                self.state_store,
+                self.state_path,
+                self.run_name,
+                "pipeline_state/phase_1/state.json",
+                f"Phase-1 state not found at '{self.state_path}'.",
+            )
+        )
 
     def _save_state(self, state: PhaseOneSweepState) -> None:
         """Persist the sweep state and best-feature summary."""
-        _atomic_write_json(self.state_path, state.to_dict())
+        if self.use_mlflow_persistence:
+            save_json_artifact(
+                self.state_store,
+                self.state_path,
+                self.run_name,
+                "pipeline_state/phase_1/state.json",
+                state.to_dict(),
+            )
+        else:
+            _atomic_write_json(self.state_path, state.to_dict())
         if state.best_trial_id is not None:
             best_trial = state.completed_trials[state.best_trial_id]
             _, _, aggregate = _select_phase_one_winner(state.completed_trials)
-            _atomic_write_json(
-                self.best_feature_path,
-                {
-                    "schema_version": PHASE_ONE_STATE_SCHEMA_VERSION,
-                    "trial": best_trial.to_dict(),
-                    "aggregate": aggregate,
-                },
-            )
+            payload = {
+                "schema_version": PHASE_ONE_STATE_SCHEMA_VERSION,
+                "trial": best_trial.to_dict(),
+                "aggregate": aggregate,
+            }
+            if self.use_mlflow_persistence:
+                save_json_artifact(
+                    self.state_store,
+                    self.best_feature_path,
+                    self.run_name,
+                    "pipeline_state/phase_1/best_feature.json",
+                    payload,
+                )
+            else:
+                _atomic_write_json(self.best_feature_path, payload)
 
     def _trial_run_name(self, trial: PhaseOneTrialSpec) -> str:
         """Return the child run name for one trial."""
@@ -188,10 +222,7 @@ class PhaseOneSweepRunner:
 
     def _trial_output_paths(self, trial: PhaseOneTrialSpec) -> tuple[Path, Path, Path]:
         """Return config, child state, and trial directory paths for one trial."""
-        trial_dir = self.phase_dir / "runs" / trial.trial_id
-        config_path = trial_dir / "temp_config.json"
-        child_state_path = self.output_dir / "phase_1" / "runs" / trial.trial_id / "state.json"
-        return trial_dir, config_path, child_state_path
+        return build_trial_output_paths(self.phase_dir, trial.trial_id)
 
     def _build_trial_config(self, trial: PhaseOneTrialSpec) -> ExperimentConfig:
         """Build the concrete experiment config for a trial."""
@@ -214,7 +245,11 @@ class PhaseOneSweepRunner:
             check=True,
         )
 
-        summary = _summary_from_completed_process(child_state_path, completed_process)
+        summary = summary_from_completed_process(
+            child_state_path,
+            completed_process,
+            read_json=_read_json,
+        )
         validation_macro_f1 = _trial_score(summary)
         return PhaseOneTrialRecord(
             trial_id=trial.trial_id,

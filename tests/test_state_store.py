@@ -7,6 +7,7 @@ from speech_recognition.orchestration.state import (
     PhaseArtifact,
     PipelineState,
     PipelineStateStore,
+    save_json_artifact,
 )
 
 
@@ -121,3 +122,85 @@ def test_load_uses_checkpoint_pointer_when_state_candidates_are_bad(tmp_path: Pa
 
     assert recovered.completed_phases == ("phase-1",)
     assert recovered.metrics["phase-1"]["macro_f1"] == pytest.approx(0.63)
+
+
+def test_mlflow_state_save_bootstraps_missing_experiment_and_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: dict[str, object] = {}
+
+    class _Experiment:
+        experiment_id = "exp-1"
+
+    class _RunInfo:
+        run_id = "run-1"
+
+    class _Run:
+        info = _RunInfo()
+
+    class _Client:
+        def get_experiment_by_name(self, name: str):
+            calls["experiment_name"] = name
+            return
+
+        def create_experiment(self, name: str) -> str:
+            calls["created_experiment"] = name
+            return _Experiment.experiment_id
+
+        def search_runs(self, *_args, **_kwargs):
+            return []
+
+        def create_run(self, experiment_id: str, tags: dict[str, str]):
+            calls["created_run_experiment_id"] = experiment_id
+            calls["created_run_tags"] = tags
+            return _Run()
+
+        def log_artifact(self, run_id: str, local_path: str, artifact_path: str) -> None:
+            calls["logged_run_id"] = run_id
+            calls["logged_artifact_path"] = artifact_path
+            assert Path(local_path).exists()
+
+    class _Tracking:
+        def __init__(self, client: _Client) -> None:
+            self._client = client
+
+        def MlflowClient(self) -> _Client:  # noqa: N802 - matches MLflow API
+            return self._client
+
+    class _MLflow:
+        def __init__(self, client: _Client) -> None:
+            self.tracking = _Tracking(client)
+
+        def set_tracking_uri(self, uri: str) -> None:
+            calls["tracking_uri"] = uri
+
+    fake_mlflow = _MLflow(_Client())
+    monkeypatch.setattr(
+        "speech_recognition.orchestration.state.importlib.import_module",
+        lambda module_name: fake_mlflow,  # noqa: ARG005
+    )
+
+    store = PipelineStateStore(
+        base_dir=tmp_path / "outputs",
+        use_mlflow=True,
+        tracking_uri="sqlite:///mlruns.db",
+        experiment_name="default",
+    )
+
+    save_json_artifact(
+        store,
+        local_path=tmp_path / "ignored.json",
+        run_name="default",
+        mlflow_artifact_path="pipeline_state/phase_1/state.json",
+        payload={"status": "ok"},
+    )
+
+    assert calls["created_experiment"] == "default"
+    assert calls["created_run_experiment_id"] == "exp-1"
+    assert calls["logged_run_id"] == "run-1"
+    assert calls["logged_artifact_path"] == "pipeline_state/phase_1"
+    assert calls["created_run_tags"] == {
+        "pipeline.run_name": "default",
+        "mlflow.runName": "default",
+        "pipeline.run_role": "pipeline-state",
+    }

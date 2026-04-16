@@ -72,27 +72,27 @@ datasets:
 
 # Execute phase 1
 phase-1:
-	uv run speech-recognition phase-1 --output-dir outputs --run-name default
+	uv run speech-recognition phase-1 --run-name default
 
 # Execute phase 2
 phase-2:
-	uv run speech-recognition phase-2 --output-dir outputs --run-name default
+	uv run speech-recognition phase-2 --run-name default
 
 # Execute phase 3
 phase-3:
-	uv run speech-recognition phase-3 --output-dir outputs --run-name default
+	uv run speech-recognition phase-3 --run-name default
 
 # Execute phase 4
 phase-4:
-	uv run speech-recognition phase-4 --output-dir outputs --run-name default
+	uv run speech-recognition phase-4 --run-name default
 
 # Show pipeline state for the default run namespace
 status:
-	uv run speech-recognition status --output-dir outputs --run-name default
+	uv run speech-recognition status --run-name default
 
 # Execute the full pipeline
 full-pipeline:
-	uv run speech-recognition run --output-dir outputs --run-name default --mlflow-only
+	uv run speech-recognition run --run-name default --mlflow-only
 
 # Execute all orchestration phases with lightweight smoke-test limits.
 full-pipeline-check:

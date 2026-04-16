@@ -5,9 +5,9 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ...config import ExperimentConfig
-from ..phase_one import _serialize
 from ..phase_three import PhaseThreeTrialRecord
 from ..phase_two import _scheduler_config_for_trial
+from ..state import _serialize
 from .constants import (
     PHASE_FOUR_METHODS,
     PHASE_FOUR_STRICT_DROP_LIMIT,

@@ -13,6 +13,7 @@ import torch
 from ...config import ExperimentConfig
 from ...features.extractors import WaveformLoader, build_feature_extractor
 from ...models.registry import build_model_adapter
+from ...training.engine import select_training_device
 from ..tracking import _TRACKING_LOGGER, _resolve_tracking_uri
 from .shared import (
     ALL_LABELS,
@@ -26,6 +27,7 @@ from .shared import (
     _load_split_records,
     _predict,
     _resolve_dataset_root,
+    _shared_two_head_probs_from_logits,
 )
 from .strategies import (
     _compose_two_stage_probs,
@@ -36,8 +38,12 @@ from .strategies import (
 )
 
 
-def _latest_checkpoint_path(checkpoint_dir: Path) -> Path | None:
-    """Return the latest numbered checkpoint in a directory."""
+def _preferred_checkpoint_path(checkpoint_dir: Path) -> Path | None:
+    """Return best checkpoint when available, otherwise latest numbered checkpoint."""
+    best_candidate = checkpoint_dir / "checkpoint_best.pt"
+    if best_candidate.exists():
+        return best_candidate
+
     candidates = sorted(checkpoint_dir.glob("checkpoint_step_*.pt"))
     if not candidates:
         return None
@@ -105,16 +111,89 @@ def _checkpoint_step(path: str) -> int:
         return -1
 
 
-def _latest_mlflow_checkpoint_artifact(client: Any, run_id: str, root: str) -> str | None:
-    """Return latest checkpoint artifact path under a root directory."""
+def _preferred_mlflow_checkpoint_artifact(client: Any, run_id: str, root: str) -> str | None:
+    """Return best checkpoint artifact when present, otherwise latest checkpoint step."""
+    try:
+        run = client.get_run(run_id)
+    except Exception:
+        run = None
+
+    if run is not None:
+        tags = getattr(getattr(run, "data", None), "tags", {}) or {}
+        tagged_artifact = tags.get("latest_checkpoint_artifact")
+        tagged_step_raw = tags.get("latest_checkpoint_step")
+        if isinstance(tagged_artifact, str):
+            if tagged_artifact.endswith("checkpoint_best.pt"):
+                return tagged_artifact
+            if tagged_step_raw is not None:
+                try:
+                    int(tagged_step_raw)
+                    return tagged_artifact
+                except (TypeError, ValueError):
+                    pass
+
     candidates = [
         path
         for path in _collect_artifact_file_paths(client, run_id, root)
-        if Path(path).name.startswith("checkpoint_step_") and Path(path).suffix == ".pt"
+        if Path(path).suffix == ".pt"
     ]
     if not candidates:
         return None
-    return max(candidates, key=_checkpoint_step)
+
+    best_matches = [path for path in candidates if Path(path).name == "checkpoint_best.pt"]
+    if best_matches:
+        # Prefer the shortest artifact path to avoid selecting a nested duplicate.
+        return min(best_matches, key=lambda path: (path.count("/"), path))
+
+    step_candidates = [
+        path for path in candidates if Path(path).name.startswith("checkpoint_step_")
+    ]
+    if not step_candidates:
+        return None
+    return max(step_candidates, key=_checkpoint_step)
+
+
+def _prediction_artifact_filename(config: ExperimentConfig, evaluation_split: str) -> str:
+    """Return the prediction artifact filename for the requested split."""
+    return (
+        "test_predictions.json"
+        if evaluation_split == config.dataset.test_split
+        else "validation_predictions.json"
+    )
+
+
+def _build_eval_result(
+    *,
+    epoch: int,
+    step: int,
+    checkpoint_path: str | None,
+    validation_macro_f1: float,
+    metrics: dict[str, Any],
+    prediction_artifact: str | None,
+    phase: str,
+    metric_phase: str | None = None,
+) -> dict[str, Any]:
+    """Assemble the standard evaluation payload."""
+    normalized_metrics = dict(metrics)
+    normalized_metrics["validation_macro_f1"] = float(validation_macro_f1)
+
+    result = {
+        "epoch": int(epoch),
+        "step": int(step),
+        "checkpoint_path": checkpoint_path,
+        "validation_macro_f1": float(validation_macro_f1),
+        "metrics": normalized_metrics,
+        "core_command_macro_f1": float(normalized_metrics["core_command_macro_f1"]),
+        "unknown_f1": float(normalized_metrics["unknown_f1"]),
+        "silence_f1": float(normalized_metrics["silence_f1"]),
+        "macro_f1_nc": float(normalized_metrics["macro_f1_nc"]),
+        "inference_latency_ms_mean": float(normalized_metrics["inference_latency_ms_mean"]),
+        "prediction_artifact": prediction_artifact,
+        "phase": phase,
+    }
+    if metric_phase is not None:
+        result["metric_phase"] = metric_phase
+    return result
 
 
 def _load_checkpoint_payload(
@@ -131,7 +210,7 @@ def _load_checkpoint_payload(
         return None
 
     client, run_id = run_context
-    artifact_path = _latest_mlflow_checkpoint_artifact(client, run_id, artifact_root)
+    artifact_path = _preferred_mlflow_checkpoint_artifact(client, run_id, artifact_root)
     if artifact_path is None:
         return None
 
@@ -222,17 +301,17 @@ def _execute_two_stage_eval_only(
     run_context = _mlflow_client_and_run(config, run_name)
 
     gate_loaded = _load_checkpoint_payload(
-        _latest_checkpoint_path(run_dir / "checkpoints" / "gate"),
+        _preferred_checkpoint_path(run_dir / "checkpoints" / "gate"),
         "checkpoints/gate",
         run_context,
     )
     command_loaded = _load_checkpoint_payload(
-        _latest_checkpoint_path(run_dir / "checkpoints" / "command"),
+        _preferred_checkpoint_path(run_dir / "checkpoints" / "command"),
         "checkpoints/command",
         run_context,
     )
     non_command_loaded = _load_checkpoint_payload(
-        _latest_checkpoint_path(run_dir / "checkpoints" / "non_command"),
+        _preferred_checkpoint_path(run_dir / "checkpoints" / "non_command"),
         "checkpoints/non_command",
         run_context,
     )
@@ -309,7 +388,7 @@ def _execute_two_stage_eval_only(
     command_model.load_state_dict(command_state["model_state_dict"])
     non_command_model.load_state_dict(non_command_state["model_state_dict"])
 
-    device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
+    device = select_training_device()
     gate_model.to(device)
     command_model.to(device)
     non_command_model.to(device)
@@ -345,23 +424,15 @@ def _execute_two_stage_eval_only(
         config,
         run_name,
     )
-    metrics = dict(test_metrics)
-    metrics["validation_macro_f1"] = validation_macro_f1
-
-    return {
-        "epoch": config.training.epochs,
-        "step": 0,
-        "checkpoint_path": gate_reference,
-        "validation_macro_f1": validation_macro_f1,
-        "metrics": metrics,
-        "core_command_macro_f1": float(metrics["core_command_macro_f1"]),
-        "unknown_f1": float(metrics["unknown_f1"]),
-        "silence_f1": float(metrics["silence_f1"]),
-        "macro_f1_nc": float(metrics["macro_f1_nc"]),
-        "inference_latency_ms_mean": float(metrics["inference_latency_ms_mean"]),
-        "prediction_artifact": "predictions/test_predictions.json",
-        "phase": config.phase.phase,
-    }
+    return _build_eval_result(
+        epoch=config.training.epochs,
+        step=0,
+        checkpoint_path=gate_reference,
+        validation_macro_f1=validation_macro_f1,
+        metrics=test_metrics,
+        prediction_artifact="predictions/test_predictions.json",
+        phase=config.phase.phase,
+    )
 
 
 def _execute_shared_two_head_eval_only(
@@ -373,7 +444,7 @@ def _execute_shared_two_head_eval_only(
     run_dir = _build_run_dir(config, output_dir, run_name)
     run_context = _mlflow_client_and_run(config, run_name)
     loaded = _load_checkpoint_payload(
-        _latest_checkpoint_path(run_dir / "checkpoints" / "shared_two_head"),
+        _preferred_checkpoint_path(run_dir / "checkpoints" / "shared_two_head"),
         "checkpoints/shared_two_head",
         run_context,
     )
@@ -407,7 +478,7 @@ def _execute_shared_two_head_eval_only(
         model_config=config.model,
     )
     model.load_state_dict(checkpoint_state["model_state_dict"])
-    device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
+    device = select_training_device()
     model.to(device)
 
     targets, logits_payload, latency_ms = _predict_logits(
@@ -417,23 +488,7 @@ def _execute_shared_two_head_eval_only(
         warmup_iterations=config.evaluation.warmup_iterations,
     )
     logits = np.array(logits_payload, dtype=np.float32)
-    cmd_logits = logits[:, : len(COMMAND_LABELS)]
-    nc_logits = logits[:, len(COMMAND_LABELS) :]
-    cmd_probs = np.exp(cmd_logits - cmd_logits.max(axis=1, keepdims=True))
-    cmd_probs /= cmd_probs.sum(axis=1, keepdims=True)
-    nc_probs = np.exp(nc_logits - nc_logits.max(axis=1, keepdims=True))
-    nc_probs /= nc_probs.sum(axis=1, keepdims=True)
-
-    cmd_conf = cmd_probs.max(axis=1, keepdims=True)
-    nc_conf = nc_probs.max(axis=1, keepdims=True)
-    denom = np.clip(cmd_conf + nc_conf, a_min=1e-8, a_max=None)
-    cmd_mass = cmd_conf / denom
-    nc_mass = nc_conf / denom
-
-    combined = np.zeros((logits.shape[0], len(ALL_LABELS)), dtype=np.float32)
-    combined[:, : len(COMMAND_LABELS)] = cmd_mass * cmd_probs
-    combined[:, len(COMMAND_LABELS) :] = nc_mass * nc_probs
-    probs = combined.tolist()
+    probs = _shared_two_head_probs_from_logits(logits)
 
     test_metrics = _evaluate_predictions(targets, probs, "flat_multiclass")
     test_metrics["inference_latency_ms_mean"] = latency_ms
@@ -444,23 +499,15 @@ def _execute_shared_two_head_eval_only(
         config,
         run_name,
     )
-    metrics = dict(test_metrics)
-    metrics["validation_macro_f1"] = validation_macro_f1
-
-    return {
-        "epoch": config.training.epochs,
-        "step": 0,
-        "checkpoint_path": checkpoint_reference,
-        "validation_macro_f1": validation_macro_f1,
-        "metrics": metrics,
-        "core_command_macro_f1": float(metrics["core_command_macro_f1"]),
-        "unknown_f1": float(metrics["unknown_f1"]),
-        "silence_f1": float(metrics["silence_f1"]),
-        "macro_f1_nc": float(metrics["macro_f1_nc"]),
-        "inference_latency_ms_mean": float(metrics["inference_latency_ms_mean"]),
-        "prediction_artifact": "predictions/test_predictions.json",
-        "phase": config.phase.phase,
-    }
+    return _build_eval_result(
+        epoch=config.training.epochs,
+        step=0,
+        checkpoint_path=checkpoint_reference,
+        validation_macro_f1=validation_macro_f1,
+        metrics=test_metrics,
+        prediction_artifact="predictions/test_predictions.json",
+        phase=config.phase.phase,
+    )
 
 
 def execute_single_eval(
@@ -481,18 +528,16 @@ def execute_single_eval(
             config.dataset.test_split,
             warmup_iterations=config.evaluation.warmup_iterations,
         )
-        metrics = dict(payload["metrics"])
-        metrics["validation_macro_f1"] = float(payload["validation_macro_f1"])
-        return {
-            **payload,
-            "metrics": metrics,
-            "core_command_macro_f1": float(metrics["core_command_macro_f1"]),
-            "unknown_f1": float(metrics["unknown_f1"]),
-            "silence_f1": float(metrics["silence_f1"]),
-            "macro_f1_nc": float(metrics["macro_f1_nc"]),
-            "inference_latency_ms_mean": float(metrics["inference_latency_ms_mean"]),
-            "phase": config.phase.phase,
-        }
+        return _build_eval_result(
+            epoch=payload["epoch"],
+            step=payload["step"],
+            checkpoint_path=payload.get("checkpoint_path"),
+            validation_macro_f1=float(payload["validation_macro_f1"]),
+            metrics=payload["metrics"],
+            prediction_artifact=payload.get("prediction_artifact"),
+            phase=config.phase.phase,
+            metric_phase=payload.get("metric_phase"),
+        )
 
     if config.evaluation.strategy == "shared_two_head":
         cached_payload = _execute_shared_two_head_eval_only(config, output_dir, run_name)
@@ -505,23 +550,21 @@ def execute_single_eval(
             config.dataset.test_split,
             warmup_iterations=config.evaluation.warmup_iterations,
         )
-        metrics = dict(payload["metrics"])
-        metrics["validation_macro_f1"] = float(payload["validation_macro_f1"])
-        return {
-            **payload,
-            "metrics": metrics,
-            "core_command_macro_f1": float(metrics["core_command_macro_f1"]),
-            "unknown_f1": float(metrics["unknown_f1"]),
-            "silence_f1": float(metrics["silence_f1"]),
-            "macro_f1_nc": float(metrics["macro_f1_nc"]),
-            "inference_latency_ms_mean": float(metrics["inference_latency_ms_mean"]),
-            "phase": config.phase.phase,
-        }
+        return _build_eval_result(
+            epoch=payload["epoch"],
+            step=payload["step"],
+            checkpoint_path=payload.get("checkpoint_path"),
+            validation_macro_f1=float(payload["validation_macro_f1"]),
+            metrics=payload["metrics"],
+            prediction_artifact=payload.get("prediction_artifact"),
+            phase=config.phase.phase,
+            metric_phase=payload.get("metric_phase"),
+        )
 
     run_dir = _build_run_dir(config, output_dir, run_name)
     run_context = _mlflow_client_and_run(config, run_name)
     loaded = _load_checkpoint_payload(
-        _latest_checkpoint_path(run_dir / "checkpoints"),
+        _preferred_checkpoint_path(run_dir / "checkpoints"),
         "checkpoints",
         run_context,
     )
@@ -577,7 +620,7 @@ def execute_single_eval(
         shuffle=False,
     )
 
-    device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
+    device = select_training_device()
     model.to(device)
     targets, probs, latency_ms = _predict(
         model,
@@ -589,22 +632,14 @@ def execute_single_eval(
     test_metrics = _evaluate_predictions(targets, probs, config.evaluation.strategy)
     test_metrics["inference_latency_ms_mean"] = latency_ms
 
-    metrics = dict(test_metrics)
-    metrics["validation_macro_f1"] = validation_macro_f1
-
-    return {
-        "epoch": train_payload.get("epoch", config.training.epochs)
+    return _build_eval_result(
+        epoch=train_payload.get("epoch", config.training.epochs)
         if train_payload is not None
         else config.training.epochs,
-        "step": train_payload.get("step", 0) if train_payload is not None else 0,
-        "checkpoint_path": checkpoint_reference,
-        "validation_macro_f1": validation_macro_f1,
-        "metrics": metrics,
-        "core_command_macro_f1": float(metrics["core_command_macro_f1"]),
-        "unknown_f1": float(metrics["unknown_f1"]),
-        "silence_f1": float(metrics["silence_f1"]),
-        "macro_f1_nc": float(metrics["macro_f1_nc"]),
-        "inference_latency_ms_mean": float(metrics["inference_latency_ms_mean"]),
-        "prediction_artifact": "predictions/test_predictions.json",
-        "phase": config.phase.phase,
-    }
+        step=train_payload.get("step", 0) if train_payload is not None else 0,
+        checkpoint_path=checkpoint_reference,
+        validation_macro_f1=validation_macro_f1,
+        metrics=test_metrics,
+        prediction_artifact=_prediction_artifact_filename(config, config.dataset.test_split),
+        phase=config.phase.phase,
+    )

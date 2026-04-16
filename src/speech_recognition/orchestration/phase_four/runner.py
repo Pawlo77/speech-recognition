@@ -2,7 +2,6 @@
 
 import json
 import logging
-import subprocess
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -18,8 +17,15 @@ from ...config import ExperimentConfig
 from ..phase_one import _atomic_write_json, _read_json
 from ..phase_three import PhaseThreeTrialRecord
 from ..services import build_isolated_subprocess_env
+from ..state import (
+    PipelineStateStore,
+    load_json_artifact,
+    load_json_artifact_or_raise,
+    save_json_artifact,
+)
 from ..sweep_utils import (
     apply_trial_cap,
+    build_trial_output_paths,
     run_subprocess_with_live_output,
     summary_from_completed_process,
     sweep_seeds,
@@ -99,18 +105,6 @@ def build_phase_four_test_command(config_path: Path, run_name: str) -> list[str]
     ]
 
 
-def _summary_from_completed_process(
-    child_state_path: Path, completed_process: subprocess.CompletedProcess[str]
-) -> dict[str, Any]:
-    """Extract the summary payload from a completed subprocess,
-    preferring the child state file over stdout."""
-    return summary_from_completed_process(
-        child_state_path,
-        completed_process,
-        read_json=_read_json,
-    )
-
-
 def _read_artifact(path: Path, description: str) -> dict[str, Any]:
     """Read a JSON artifact from the given path with error handling and validation."""
     if not path.exists():
@@ -182,7 +176,13 @@ def _load_prediction_payload_from_mlflow(
 class PhaseFourSweepRunner:
     """Run the phase-4 held-out evaluation sweep using child processes."""
 
-    def __init__(self, output_dir: Path, base_config: ExperimentConfig | None = None) -> None:
+    def __init__(
+        self,
+        output_dir: Path,
+        base_config: ExperimentConfig | None = None,
+        run_name: str = "default",
+        use_mlflow_persistence: bool = False,
+    ) -> None:
         self.output_dir = output_dir
         self.phase_dir = self.output_dir / "phase_4"
         self.state_path = self.phase_dir / "state.json"
@@ -190,13 +190,30 @@ class PhaseFourSweepRunner:
         self.method_winners_path = self.phase_dir / "method_winners.json"
         self.selected_test_eval_path = self.phase_dir / "selected_test_eval.json"
         self.base_config = base_config or ExperimentConfig()
+        self.run_name = run_name
+        self.use_mlflow_persistence = use_mlflow_persistence
+        self.state_store = PipelineStateStore(
+            output_dir,
+            use_mlflow=use_mlflow_persistence,
+            tracking_uri=self.base_config.mlflow.tracking_uri,
+            experiment_name=self.base_config.mlflow.experiment_name,
+        )
         self.phase_three_best_backbones_path = self.output_dir / "phase_3" / "best_backbones.json"
         self.phase_two_best_optim_path = self.output_dir / "phase_2" / "best_optim.json"
 
     def _load_phase_three_backbones(self) -> dict[str, PhaseThreeTrialRecord]:
-        artifact = _read_artifact(
-            self.phase_three_best_backbones_path, "Phase-3 best backbones artifact"
-        )
+        if self.use_mlflow_persistence:
+            artifact = load_json_artifact_or_raise(
+                self.state_store,
+                self.phase_three_best_backbones_path,
+                self.run_name,
+                "pipeline_state/phase_3/best_backbones.json",
+                f"Phase-3 best backbones artifact not found for run '{self.run_name}'.",
+            )
+        else:
+            artifact = _read_artifact(
+                self.phase_three_best_backbones_path, "Phase-3 best backbones artifact"
+            )
         top_three_trials = artifact.get("top_three_trials")
         if not isinstance(top_three_trials, list) or not top_three_trials:
             raise ValueError("Phase-3 best backbones artifact is missing top_three_trials.")
@@ -212,6 +229,21 @@ class PhaseFourSweepRunner:
     def load_state(self) -> PhaseFourSweepState:
         """Load the persisted sweep state or create a new one."""
         backbone_trials = self._load_phase_three_backbones()
+        if self.use_mlflow_persistence:
+            payload = load_json_artifact(
+                self.state_store,
+                self.state_path,
+                self.run_name,
+                "pipeline_state/phase_4/state.json",
+            )
+            if payload is None:
+                return PhaseFourSweepState.fresh(
+                    self.output_dir,
+                    self.phase_three_best_backbones_path,
+                    tuple(backbone_trials),
+                )
+            return PhaseFourSweepState.from_dict(payload)
+
         if not self.state_path.exists():
             return PhaseFourSweepState.fresh(
                 self.output_dir,
@@ -222,27 +254,51 @@ class PhaseFourSweepRunner:
 
     def _save_state(self, state: PhaseFourSweepState) -> None:
         """Persist the sweep state and selection artifacts."""
-        _atomic_write_json(self.state_path, state.to_dict())
+        payload = state.to_dict()
+        if self.use_mlflow_persistence:
+            save_json_artifact(
+                self.state_store,
+                self.state_path,
+                self.run_name,
+                "pipeline_state/phase_4/state.json",
+                payload,
+            )
+        else:
+            _atomic_write_json(self.state_path, payload)
         if state.best_trial_id is not None:
             best_trial = state.completed_trials[state.best_trial_id]
-            _atomic_write_json(
-                self.best_eval_path,
-                {
-                    "schema_version": PHASE_FOUR_STATE_SCHEMA_VERSION,
-                    "best_trial": best_trial.to_dict(),
-                },
-            )
+            best_payload = {
+                "schema_version": PHASE_FOUR_STATE_SCHEMA_VERSION,
+                "best_trial": best_trial.to_dict(),
+            }
+            if self.use_mlflow_persistence:
+                save_json_artifact(
+                    self.state_store,
+                    self.best_eval_path,
+                    self.run_name,
+                    "pipeline_state/phase_4/best_eval.json",
+                    best_payload,
+                )
+            else:
+                _atomic_write_json(self.best_eval_path, best_payload)
         if state.method_winner_ids:
-            _atomic_write_json(
-                self.method_winners_path,
-                {
-                    "schema_version": PHASE_FOUR_STATE_SCHEMA_VERSION,
-                    "method_winners": {
-                        method: state.completed_trials[trial_id].to_dict()
-                        for method, trial_id in state.method_winner_ids.items()
-                    },
+            method_payload = {
+                "schema_version": PHASE_FOUR_STATE_SCHEMA_VERSION,
+                "method_winners": {
+                    method: state.completed_trials[trial_id].to_dict()
+                    for method, trial_id in state.method_winner_ids.items()
                 },
-            )
+            }
+            if self.use_mlflow_persistence:
+                save_json_artifact(
+                    self.state_store,
+                    self.method_winners_path,
+                    self.run_name,
+                    "pipeline_state/phase_4/method_winners.json",
+                    method_payload,
+                )
+            else:
+                _atomic_write_json(self.method_winners_path, method_payload)
 
     def _trial_run_name(self, trial: PhaseFourTrialSpec) -> str:
         """Return the MLflow run name for a given trial specification."""
@@ -251,10 +307,7 @@ class PhaseFourSweepRunner:
     def _trial_output_paths(self, trial: PhaseFourTrialSpec) -> tuple[Path, Path, Path]:
         """Return the trial directory, config path, and child
         state path for a given trial specification."""
-        trial_dir = self.phase_dir / "runs" / trial.trial_id
-        config_path = trial_dir / "temp_config.json"
-        child_state_path = self.output_dir / "phase_4" / "runs" / trial.trial_id / "state.json"
-        return trial_dir, config_path, child_state_path
+        return build_trial_output_paths(self.phase_dir, trial.trial_id)
 
     def _build_trial_config(
         self,
@@ -288,7 +341,11 @@ class PhaseFourSweepRunner:
             check=True,
         )
 
-        summary = _summary_from_completed_process(child_state_path, completed_process)
+        summary = summary_from_completed_process(
+            child_state_path,
+            completed_process,
+            read_json=_read_json,
+        )
         metrics = _phase_four_score_recursive(summary)
         prediction_artifact = _phase_four_prediction_artifact_recursive(summary)
         baseline_trial_id = trial.backbone_ids[0]
@@ -667,7 +724,11 @@ class PhaseFourSweepRunner:
             )
 
             child_state_path = self.output_dir / "phase_4" / "runs" / run_name / "state.json"
-            summary = _summary_from_completed_process(child_state_path, completed_process)
+            summary = summary_from_completed_process(
+                child_state_path,
+                completed_process,
+                read_json=_read_json,
+            )
             metrics = _phase_four_score_recursive(summary)
 
             # Extract test prediction artifact path from the test eval output
@@ -708,10 +769,19 @@ class PhaseFourSweepRunner:
     def execute(self) -> dict[str, Any]:
         """Run the full phase-4 sweep, skipping completed trials."""
         backbone_trials = self._load_phase_three_backbones()
-        optim_artifact = _read_artifact(
-            self.phase_two_best_optim_path,
-            "Phase-2 best optimization artifact",
-        )
+        if self.use_mlflow_persistence:
+            optim_artifact = load_json_artifact_or_raise(
+                self.state_store,
+                self.phase_two_best_optim_path,
+                self.run_name,
+                "pipeline_state/phase_2/best_optim.json",
+                f"Phase-2 best optimization artifact not found for run '{self.run_name}'.",
+            )
+        else:
+            optim_artifact = _read_artifact(
+                self.phase_two_best_optim_path,
+                "Phase-2 best optimization artifact",
+            )
         optimizer_payload = _phase_four_optimizer_config(optim_artifact)
         seeds = sweep_seeds(self.base_config.seeds)
         trials = apply_trial_cap(_build_phase_four_trials(tuple(backbone_trials), seeds))

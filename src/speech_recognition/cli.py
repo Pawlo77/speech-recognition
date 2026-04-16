@@ -2,6 +2,7 @@
 
 import argparse
 import importlib.util
+import inspect
 import json
 import tempfile
 from collections.abc import Sequence
@@ -95,6 +96,35 @@ def _default_experiment_config() -> ExperimentConfig:
     return ExperimentConfig(training=training, scheduler=scheduler)
 
 
+def _bind_default_experiment_name_to_run(
+    config: ExperimentConfig,
+    run_name: str,
+) -> ExperimentConfig:
+    """Bind the default MLflow experiment name to the CLI run name.
+
+    This keeps run-scoped invocations in one experiment unless the user
+    explicitly configured a custom MLflow experiment name.
+    """
+    default_experiment_name = MLflowTrackingConfig().experiment_name
+    if (
+        not config.mlflow.enabled
+        or config.mlflow.experiment_name != default_experiment_name
+        or not run_name.strip()
+    ):
+        return config
+    return replace(
+        config,
+        mlflow=replace(config.mlflow, experiment_name=run_name),
+    )
+
+
+def _call_with_supported_kwargs(callable_obj: Any, *args: Any, **kwargs: Any) -> Any:
+    """Call a callable while filtering out unsupported keyword arguments."""
+    supported_kwargs = set(inspect.signature(callable_obj).parameters)
+    filtered_kwargs = {key: value for key, value in kwargs.items() if key in supported_kwargs}
+    return callable_obj(*args, **filtered_kwargs)
+
+
 def _shared_parent_parser() -> argparse.ArgumentParser:
     """Create the shared argument parser used by all commands."""
     parent = argparse.ArgumentParser(add_help=False)
@@ -184,11 +214,27 @@ def _run_sweep_pipeline(
     config: ExperimentConfig | None,
     run_name: str,
     include_phase_four: bool,
+    use_mlflow_persistence: bool = False,
 ) -> dict[str, Any]:
     """Execute real phase sweeps in order, reusing sweep-resume semantics."""
-    phase_one = PhaseOneSweepRunner(output_dir, base_config=config)
-    phase_two = PhaseTwoSweepRunner(output_dir, base_config=config)
-    phase_three = PhaseThreeSweepRunner(output_dir, base_config=config)
+    phase_one = PhaseOneSweepRunner(
+        output_dir,
+        base_config=config,
+        run_name=run_name,
+        use_mlflow_persistence=use_mlflow_persistence,
+    )
+    phase_two = PhaseTwoSweepRunner(
+        output_dir,
+        base_config=config,
+        run_name=run_name,
+        use_mlflow_persistence=use_mlflow_persistence,
+    )
+    phase_three = PhaseThreeSweepRunner(
+        output_dir,
+        base_config=config,
+        run_name=run_name,
+        use_mlflow_persistence=use_mlflow_persistence,
+    )
 
     phase_payloads: dict[str, dict[str, Any]] = {
         "phase-1": phase_one.execute(),
@@ -196,7 +242,12 @@ def _run_sweep_pipeline(
         "phase-3": phase_three.execute(),
     }
     if include_phase_four:
-        phase_four = PhaseFourSweepRunner(output_dir, base_config=config)
+        phase_four = PhaseFourSweepRunner(
+            output_dir,
+            base_config=config,
+            run_name=run_name,
+            use_mlflow_persistence=use_mlflow_persistence,
+        )
         phase_payloads["phase-4"] = phase_four.execute()
 
     completed_phases = [
@@ -217,11 +268,27 @@ def _build_sweep_status_payload(
     output_dir: Path,
     config: ExperimentConfig | None,
     run_name: str,
+    use_mlflow_persistence: bool = False,
 ) -> dict[str, Any]:
     """Build pipeline status from persisted sweep state files."""
-    phase_one = PhaseOneSweepRunner(output_dir, base_config=config)
-    phase_two = PhaseTwoSweepRunner(output_dir, base_config=config)
-    phase_three = PhaseThreeSweepRunner(output_dir, base_config=config)
+    phase_one = PhaseOneSweepRunner(
+        output_dir,
+        base_config=config,
+        run_name=run_name,
+        use_mlflow_persistence=use_mlflow_persistence,
+    )
+    phase_two = PhaseTwoSweepRunner(
+        output_dir,
+        base_config=config,
+        run_name=run_name,
+        use_mlflow_persistence=use_mlflow_persistence,
+    )
+    phase_three = PhaseThreeSweepRunner(
+        output_dir,
+        base_config=config,
+        run_name=run_name,
+        use_mlflow_persistence=use_mlflow_persistence,
+    )
 
     phase_payloads: dict[str, dict[str, Any]] = {
         "phase-1": _phase_status_summary(
@@ -239,7 +306,12 @@ def _build_sweep_status_payload(
     }
 
     try:
-        phase_four = PhaseFourSweepRunner(output_dir, base_config=config)
+        phase_four = PhaseFourSweepRunner(
+            output_dir,
+            base_config=config,
+            run_name=run_name,
+            use_mlflow_persistence=use_mlflow_persistence,
+        )
         phase_payloads["phase-4"] = _phase_status_summary(
             phase_four.load_state(),
             score_field="best_macro_f1_nc",
@@ -301,6 +373,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.config is not None or args.overrides:
             config = load_experiment_config(args.config, args.overrides)
         effective_config = config or _default_experiment_config()
+        effective_config = _bind_default_experiment_name_to_run(effective_config, args.run_name)
         output_dir = args.output_dir
         temporary_output_dir: tempfile.TemporaryDirectory[str] | None = None
 
@@ -325,60 +398,90 @@ def main(argv: Sequence[str] | None = None) -> int:
                 temporary_output_dir.cleanup()
             return 0
         if args.command == "phase-1":
-            sweep_runner = PhaseOneSweepRunner(output_dir, base_config=effective_config)
+            sweep_runner = _call_with_supported_kwargs(
+                PhaseOneSweepRunner,
+                output_dir,
+                base_config=effective_config,
+                run_name=args.run_name,
+                use_mlflow_persistence=args.mlflow_only,
+            )
             payload = sweep_runner.execute()
             print(json.dumps(payload, indent=2, sort_keys=True))
             if temporary_output_dir is not None:
                 temporary_output_dir.cleanup()
             return 0
         if args.command == "phase-2":
-            sweep_runner = PhaseTwoSweepRunner(output_dir, base_config=effective_config)
+            sweep_runner = _call_with_supported_kwargs(
+                PhaseTwoSweepRunner,
+                output_dir,
+                base_config=effective_config,
+                run_name=args.run_name,
+                use_mlflow_persistence=args.mlflow_only,
+            )
             payload = sweep_runner.execute()
             print(json.dumps(payload, indent=2, sort_keys=True))
             if temporary_output_dir is not None:
                 temporary_output_dir.cleanup()
             return 0
         if args.command == "phase-3":
-            sweep_runner = PhaseThreeSweepRunner(output_dir, base_config=effective_config)
+            sweep_runner = _call_with_supported_kwargs(
+                PhaseThreeSweepRunner,
+                output_dir,
+                base_config=effective_config,
+                run_name=args.run_name,
+                use_mlflow_persistence=args.mlflow_only,
+            )
             payload = sweep_runner.execute()
             print(json.dumps(payload, indent=2, sort_keys=True))
             if temporary_output_dir is not None:
                 temporary_output_dir.cleanup()
             return 0
         if args.command in {"phase-4", "eval"}:
-            sweep_runner = PhaseFourSweepRunner(output_dir, base_config=effective_config)
+            sweep_runner = _call_with_supported_kwargs(
+                PhaseFourSweepRunner,
+                output_dir,
+                base_config=effective_config,
+                run_name=args.run_name,
+                use_mlflow_persistence=args.mlflow_only,
+            )
             payload = sweep_runner.execute()
             print(json.dumps(payload, indent=2, sort_keys=True))
             if temporary_output_dir is not None:
                 temporary_output_dir.cleanup()
             return 0
         if args.command in {"run", "resume"}:
-            payload = _run_sweep_pipeline(
+            payload = _call_with_supported_kwargs(
+                _run_sweep_pipeline,
                 output_dir=output_dir,
                 config=effective_config,
                 run_name=args.run_name,
                 include_phase_four=True,
+                use_mlflow_persistence=args.mlflow_only,
             )
             print(json.dumps(payload, indent=2, sort_keys=True))
             if temporary_output_dir is not None:
                 temporary_output_dir.cleanup()
             return 0
         if args.command == "train":
-            payload = _run_sweep_pipeline(
+            payload = _call_with_supported_kwargs(
+                _run_sweep_pipeline,
                 output_dir=output_dir,
                 config=effective_config,
                 run_name=args.run_name,
                 include_phase_four=False,
+                use_mlflow_persistence=args.mlflow_only,
             )
             print(json.dumps(payload, indent=2, sort_keys=True))
             if temporary_output_dir is not None:
                 temporary_output_dir.cleanup()
             return 0
         if args.command == "status":
-            payload = _build_sweep_status_payload(
+            payload = _call_with_supported_kwargs(
+                _build_sweep_status_payload,
                 output_dir=output_dir,
                 config=effective_config,
                 run_name=args.run_name,
+                use_mlflow_persistence=args.mlflow_only,
             )
             print(json.dumps(payload, indent=2, sort_keys=True))
             if temporary_output_dir is not None:

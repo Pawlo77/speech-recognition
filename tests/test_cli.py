@@ -258,3 +258,80 @@ def test_run_mlflow_only_uses_temporary_output_dir(tmp_path: Path, monkeypatch, 
     assert used_output_dir != (tmp_path / "outputs")
     assert "speech-recognition-mlflow-" in str(used_output_dir)
     assert payload["output_dir"] == str(used_output_dir)
+
+
+def test_run_binds_default_experiment_name_to_run_name(monkeypatch, capsys) -> None:
+    seen: dict[str, str] = {}
+
+    def fake_run_sweep_pipeline(output_dir, config, run_name, include_phase_four):  # noqa: ARG001
+        assert config is not None
+        seen["experiment_name"] = config.mlflow.experiment_name
+        return {
+            "command": "run",
+            "output_dir": str(output_dir),
+            "run_name": run_name,
+            "completed_phases": [],
+            "phases": {},
+        }
+
+    monkeypatch.setattr("speech_recognition.cli._run_sweep_pipeline", fake_run_sweep_pipeline)
+
+    exit_code = main(["run", "--run-name", "default"])
+
+    assert exit_code == 0
+    assert seen["experiment_name"] == "default"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["run_name"] == "default"
+
+
+def test_run_keeps_explicit_experiment_name_from_config(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    seen: dict[str, str] = {}
+
+    def fake_run_sweep_pipeline(output_dir, config, run_name, include_phase_four):  # noqa: ARG001
+        assert config is not None
+        seen["experiment_name"] = config.mlflow.experiment_name
+        return {
+            "command": "run",
+            "output_dir": str(output_dir),
+            "run_name": run_name,
+            "completed_phases": [],
+            "phases": {},
+        }
+
+    monkeypatch.setattr("speech_recognition.cli._run_sweep_pipeline", fake_run_sweep_pipeline)
+
+    config = _configured_experiment()
+    config = ExperimentConfig(
+        dataset=config.dataset,
+        features=config.features,
+        model=config.model,
+        optimizer=config.optimizer,
+        scheduler=config.scheduler,
+        training=config.training,
+        checkpointing=config.checkpointing,
+        mlflow=MLflowTrackingConfig(
+            enabled=config.mlflow.enabled,
+            tracking_uri=config.mlflow.tracking_uri,
+            experiment_name="speech-recognition-explicit",
+            run_name=config.mlflow.run_name,
+            log_params=config.mlflow.log_params,
+            log_metrics=config.mlflow.log_metrics,
+            log_artifacts=config.mlflow.log_artifacts,
+            retain_local_checkpoints=config.mlflow.retain_local_checkpoints,
+        ),
+        evaluation=config.evaluation,
+        phase=config.phase,
+        seed=config.seed,
+        seeds=config.seeds,
+    )
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config.to_dict()), encoding="utf-8")
+
+    exit_code = main(["run", "--config", str(config_path), "--run-name", "default"])
+
+    assert exit_code == 0
+    assert seen["experiment_name"] == "speech-recognition-explicit"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["run_name"] == "default"

@@ -2,7 +2,6 @@
 
 import json
 import logging
-import subprocess
 import sys
 from collections.abc import Mapping
 from dataclasses import replace
@@ -15,8 +14,15 @@ from tqdm.auto import tqdm
 from ...config import ExperimentConfig
 from ..phase_one import _atomic_write_json, _feature_pipeline_for_trial, _read_json
 from ..services import build_isolated_subprocess_env
+from ..state import (
+    PipelineStateStore,
+    load_json_artifact,
+    load_json_artifact_or_raise,
+    save_json_artifact,
+)
 from ..sweep_utils import (
     apply_trial_cap,
+    build_trial_output_paths,
     iter_nested_payloads,
     run_subprocess_with_live_output,
     summary_from_completed_process,
@@ -116,16 +122,6 @@ def _phase_two_score(payload: Mapping[str, Any]) -> float:
     return 0.0
 
 
-def _summary_from_completed_process(
-    child_state_path: Path, completed_process: subprocess.CompletedProcess[str]
-) -> dict[str, Any]:
-    return summary_from_completed_process(
-        child_state_path,
-        completed_process,
-        read_json=_read_json,
-    )
-
-
 def _feature_artifact_trial_payload(feature_artifact_path: Path) -> dict[str, Any]:
     """Load the phase-1 best-feature artifact used as phase-2 input."""
     if not feature_artifact_path.exists():
@@ -173,34 +169,76 @@ def build_phase_two_command(config_path: Path, run_name: str, output_dir: Path) 
 class PhaseTwoSweepRunner:
     """Run the phase-2 hyperparameter sweep using child processes."""
 
-    def __init__(self, output_dir: Path, base_config: ExperimentConfig | None = None) -> None:
+    def __init__(
+        self,
+        output_dir: Path,
+        base_config: ExperimentConfig | None = None,
+        run_name: str = "default",
+        use_mlflow_persistence: bool = False,
+    ) -> None:
         self.output_dir = output_dir
         self.phase_dir = self.output_dir / "phase_2"
         self.state_path = self.phase_dir / "state.json"
         self.best_optim_path = self.phase_dir / "best_optim.json"
         self.base_config = base_config or ExperimentConfig()
         self.phase_one_best_feature_path = self.output_dir / "phase_1" / "best_feature.json"
+        self.run_name = run_name
+        self.use_mlflow_persistence = use_mlflow_persistence
+        self.state_store = PipelineStateStore(
+            output_dir,
+            use_mlflow=use_mlflow_persistence,
+            tracking_uri=self.base_config.mlflow.tracking_uri,
+            experiment_name=self.base_config.mlflow.experiment_name,
+        )
 
     def load_state(self) -> PhaseTwoSweepState:
         """Load the persisted sweep state or create a new one."""
+        if self.use_mlflow_persistence:
+            payload = load_json_artifact(
+                self.state_store,
+                self.state_path,
+                self.run_name,
+                "pipeline_state/phase_2/state.json",
+            )
+            if payload is None:
+                return PhaseTwoSweepState.fresh(self.output_dir, self.phase_one_best_feature_path)
+            return PhaseTwoSweepState.from_dict(payload)
+
         if not self.state_path.exists():
             return PhaseTwoSweepState.fresh(self.output_dir, self.phase_one_best_feature_path)
         return PhaseTwoSweepState.from_dict(_read_json(self.state_path))
 
     def _save_state(self, state: PhaseTwoSweepState) -> None:
         """Persist the sweep state and best-optimization summary."""
-        _atomic_write_json(self.state_path, state.to_dict())
+        payload = state.to_dict()
+        if self.use_mlflow_persistence:
+            save_json_artifact(
+                self.state_store,
+                self.state_path,
+                self.run_name,
+                "pipeline_state/phase_2/state.json",
+                payload,
+            )
+        else:
+            _atomic_write_json(self.state_path, payload)
         if state.best_trial_id is not None:
             best_trial = state.completed_trials[state.best_trial_id]
             _, _, aggregate = _select_phase_two_winner(state.completed_trials)
-            _atomic_write_json(
-                self.best_optim_path,
-                {
-                    "schema_version": PHASE_TWO_STATE_SCHEMA_VERSION,
-                    "trial": best_trial.to_dict(),
-                    "aggregate": aggregate,
-                },
-            )
+            best_payload = {
+                "schema_version": PHASE_TWO_STATE_SCHEMA_VERSION,
+                "trial": best_trial.to_dict(),
+                "aggregate": aggregate,
+            }
+            if self.use_mlflow_persistence:
+                save_json_artifact(
+                    self.state_store,
+                    self.best_optim_path,
+                    self.run_name,
+                    "pipeline_state/phase_2/best_optim.json",
+                    best_payload,
+                )
+            else:
+                _atomic_write_json(self.best_optim_path, best_payload)
 
     def _trial_run_name(self, trial: PhaseTwoTrialSpec) -> str:
         """Return the child run name for one trial."""
@@ -208,10 +246,7 @@ class PhaseTwoSweepRunner:
 
     def _trial_output_paths(self, trial: PhaseTwoTrialSpec) -> tuple[Path, Path, Path]:
         """Return config, child state, and trial directory paths for one trial."""
-        trial_dir = self.phase_dir / "runs" / trial.trial_id
-        config_path = trial_dir / "temp_config.json"
-        child_state_path = self.output_dir / "phase_2" / "runs" / trial.trial_id / "state.json"
-        return trial_dir, config_path, child_state_path
+        return build_trial_output_paths(self.phase_dir, trial.trial_id)
 
     def _build_trial_config(
         self, trial: PhaseTwoTrialSpec, feature_payload: Mapping[str, Any]
@@ -244,7 +279,11 @@ class PhaseTwoSweepRunner:
             check=True,
         )
 
-        summary = _summary_from_completed_process(child_state_path, completed_process)
+        summary = summary_from_completed_process(
+            child_state_path,
+            completed_process,
+            read_json=_read_json,
+        )
         validation_macro_f1 = _phase_two_score(summary)
         return PhaseTwoTrialRecord(
             trial_id=trial.trial_id,
@@ -262,7 +301,16 @@ class PhaseTwoSweepRunner:
 
     def execute(self) -> dict[str, Any]:
         """Run the full phase-2 sweep, skipping completed trials."""
-        feature_artifact = _feature_artifact_trial_payload(self.phase_one_best_feature_path)
+        if self.use_mlflow_persistence:
+            feature_artifact = load_json_artifact_or_raise(
+                self.state_store,
+                self.phase_one_best_feature_path,
+                self.run_name,
+                "pipeline_state/phase_1/best_feature.json",
+                f"Phase-1 best feature artifact not found for run '{self.run_name}'.",
+            )
+        else:
+            feature_artifact = _feature_artifact_trial_payload(self.phase_one_best_feature_path)
         feature_summary = _phase_two_feature_config(feature_artifact)
         feature_name = feature_summary["feature_name"]
         trials = apply_trial_cap(_build_phase_two_trials(feature_name))

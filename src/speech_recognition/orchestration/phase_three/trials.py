@@ -5,8 +5,9 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ...config import ExperimentConfig, ModelConfig
-from ..phase_one import _feature_pipeline_for_trial, _serialize
+from ..phase_one import _feature_pipeline_for_trial
 from ..phase_two import _scheduler_config_for_trial
+from ..state import _serialize
 from ..sweep_utils import sweep_seeds
 from .constants import (
     PHASE_THREE_AST_DROPOUTS,

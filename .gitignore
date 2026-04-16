@@ -1,5 +1,8 @@
 data/
 .ai/
+mlruns/
+mlruns.db
+mlruns.db-*
 
 report/build_latex/report-blx.bib
 report/build_latex/report.bbl

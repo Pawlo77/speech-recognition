@@ -7,8 +7,10 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
+import tempfile
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -28,6 +30,7 @@ os.environ["MLFLOW_RUN_CONTEXT_PROVIDER"] = "sysmetrics"
 _EFFICIENCY_CACHE: dict[str, dict[str, float]] = {}
 _TRACKING_LOGGER = logging.getLogger(__name__)
 _ACTIVE_MLFLOW_RUN_ID_ENV = "SPEECH_MLFLOW_ACTIVE_RUN_ID"
+_CHECKPOINT_STEP_PATTERN = re.compile(r"^checkpoint_step_(\d+)\.pt$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,10 +311,20 @@ class MlflowRunTracker:
     """Whether MLflow run is currently active."""
     _logged_checkpoint_paths: set[str] = field(default_factory=set, init=False, repr=False)
     """Checkpoint artifact paths already logged for this run."""
+    _logged_checkpoint_artifacts: set[str] = field(default_factory=set, init=False, repr=False)
+    """Checkpoint artifact events already logged for this run."""
     _latest_checkpoint_tag_value: str | None = field(default=None, init=False, repr=False)
     """Last checkpoint path tag value sent to MLflow."""
     _logged_checkpoint_artifact_value: str | None = field(default=None, init=False, repr=False)
     """Last checkpoint artifact pointer tag value sent to MLflow."""
+    _active_run_id: str | None = field(default=None, init=False, repr=False)
+    """Active MLflow run id when a run is open."""
+    _best_validation_macro_f1: float | None = field(default=None, init=False, repr=False)
+    """Best validation macro-F1 observed for this run."""
+    _best_checkpoint_path: str | None = field(default=None, init=False, repr=False)
+    """Local path for the best checkpoint observed in this run."""
+    _best_checkpoint_artifact: str | None = field(default=None, init=False, repr=False)
+    """MLflow artifact path for the best checkpoint observed in this run."""
 
     def start(self) -> None:
         """Start a run and log static hyperparameters and efficiency metrics."""
@@ -329,11 +342,23 @@ class MlflowRunTracker:
                 )
                 mlflow.set_tracking_uri(tracking_uri)
                 mlflow.set_experiment(self.tracking.experiment_name)
-                mlflow.start_run(run_name=self.run_name or self.tracking.run_name)
+                resume_run_id = os.environ.get(_ACTIVE_MLFLOW_RUN_ID_ENV)
+                if resume_run_id:
+                    try:
+                        mlflow.start_run(run_id=resume_run_id)
+                    except Exception:
+                        _TRACKING_LOGGER.warning(
+                            "Failed to resume MLflow run_id=%s; starting a new run.",
+                            resume_run_id,
+                        )
+                        mlflow.start_run(run_name=self.run_name or self.tracking.run_name)
+                else:
+                    mlflow.start_run(run_name=self.run_name or self.tracking.run_name)
             self._mlflow = mlflow
             self._run_active = True
             active_run = mlflow.active_run()
             if active_run is not None:
+                self._active_run_id = active_run.info.run_id
                 os.environ[_ACTIVE_MLFLOW_RUN_ID_ENV] = active_run.info.run_id
             mlflow.set_tag("pipeline.run_name", self.run_name)
 
@@ -369,31 +394,17 @@ class MlflowRunTracker:
                     "model_macs_1sec": float(efficiency["model_macs_1sec"]),
                 }
 
-            if self.tracking.log_metrics:
-                mlflow.log_metrics(
-                    {
-                        "model_parameters_total": float(efficiency["model_parameters_total"]),
-                        "model_macs_1sec": float(efficiency["model_macs_1sec"]),
-                    },
-                    step=0,
-                )
+            mlflow.set_tag("model_parameters_total", float(efficiency["model_parameters_total"]))
+            mlflow.set_tag("model_macs_1sec", float(efficiency["model_macs_1sec"]))
 
-            self._log_reproducibility_report(mlflow)
+            self._log_reproducibility_report()
         except Exception:
             self._run_active = False
             self._mlflow = None
 
-    def _log_reproducibility_report(self, mlflow: Any) -> None:
+    def _log_reproducibility_report(self) -> None:
         """Persist the reproducibility snapshot as an MLflow artifact."""
         report = collect_reproducibility_report()
-        if self.tracking.log_metrics:
-            mlflow.log_metrics(
-                {
-                    "hardware_total_ram_bytes": float(report.total_ram_bytes),
-                },
-                step=0,
-            )
-        mlflow.set_tag("hardware.total_ram_bytes", str(report.total_ram_bytes))
         self._log_json_artifact("reproducibility_report.json", report.to_dict(), force=True)
 
     def _log_json_artifact(
@@ -432,6 +443,7 @@ class MlflowRunTracker:
         epoch: int | None = None,
         step: int | None = None,
         extra_metrics: Mapping[str, float] | None = None,
+        metric_phase: str | None = None,
     ) -> None:
         """Log dynamic training metrics and checkpoint metadata."""
         if (
@@ -451,6 +463,9 @@ class MlflowRunTracker:
             metrics["validation_macro_f1"] = float(validation_macro_f1)
         if extra_metrics is not None:
             metrics.update({key: float(value) for key, value in extra_metrics.items()})
+
+        normalized_metric_phase = _normalize_metric_phase(metric_phase)
+        metrics = _normalize_metric_names(metrics, metric_phase=normalized_metric_phase)
 
         if not self._run_active or self._mlflow is None:
             if metrics:
@@ -478,26 +493,119 @@ class MlflowRunTracker:
 
         if checkpoint_path is not None:
             checkpoint = Path(checkpoint_path)
+            checkpoint_step = _checkpoint_step_from_path(checkpoint)
+            checkpoint_artifact = _checkpoint_artifact_path(
+                checkpoint,
+                keep_last_n=self.experiment_config.checkpointing.keep_last_n,
+                step=checkpoint_step,
+            )
             # Use a mutable tag for "latest" pointer; params are immutable in MLflow.
             checkpoint_key = str(checkpoint)
             if checkpoint_key != self._latest_checkpoint_tag_value:
                 self._mlflow.set_tag("latest_checkpoint_path", checkpoint_key)
                 self._latest_checkpoint_tag_value = checkpoint_key
+            if checkpoint_step is not None:
+                self._mlflow.set_tag("latest_checkpoint_step", int(checkpoint_step))
             checkpoint_key = str(checkpoint)
+            artifact_log_key = (
+                f"{checkpoint_key}::{checkpoint_artifact}::"
+                f"{checkpoint_step if checkpoint_step is not None else 'na'}"
+            )
             if (
                 self.tracking.log_artifacts
                 and checkpoint.exists()
-                and checkpoint_key not in self._logged_checkpoint_paths
+                and artifact_log_key not in self._logged_checkpoint_artifacts
             ):
-                checkpoint_artifact = _checkpoint_artifact_path(checkpoint)
-                self._mlflow.log_artifact(
-                    str(checkpoint),
-                    artifact_path=str(Path(checkpoint_artifact).parent),
-                )
+                artifact_parent = str(Path(checkpoint_artifact).parent)
+                target_artifact_name = Path(checkpoint_artifact).name
+                if checkpoint.name == target_artifact_name:
+                    self._mlflow.log_artifact(
+                        str(checkpoint),
+                        artifact_path=artifact_parent,
+                    )
+                else:
+                    with tempfile.TemporaryDirectory(dir=str(checkpoint.parent)) as temporary_dir:
+                        temporary_checkpoint = Path(temporary_dir) / target_artifact_name
+                        try:
+                            os.link(checkpoint, temporary_checkpoint)
+                        except OSError:
+                            shutil.copy2(checkpoint, temporary_checkpoint)
+                        self._mlflow.log_artifact(
+                            str(temporary_checkpoint),
+                            artifact_path=artifact_parent,
+                        )
                 if checkpoint_artifact != self._logged_checkpoint_artifact_value:
                     self._mlflow.set_tag("latest_checkpoint_artifact", checkpoint_artifact)
                     self._logged_checkpoint_artifact_value = checkpoint_artifact
+                self._logged_checkpoint_artifacts.add(artifact_log_key)
                 self._logged_checkpoint_paths.add(checkpoint_key)
+
+            if validation_macro_f1 is not None:
+                self._update_best_checkpoint(
+                    validation_macro_f1=float(validation_macro_f1),
+                    checkpoint_path=checkpoint_key,
+                    checkpoint_artifact=(
+                        checkpoint_artifact
+                        if self.tracking.log_artifacts and checkpoint.exists()
+                        else None
+                    ),
+                )
+
+    def _update_best_checkpoint(
+        self,
+        validation_macro_f1: float,
+        checkpoint_path: str,
+        checkpoint_artifact: str | None,
+    ) -> None:
+        """Update best-checkpoint tags when a better validation score is observed."""
+        current_best = self._best_validation_macro_f1
+        if current_best is not None:
+            if validation_macro_f1 < current_best:
+                return
+            # Promote dedicated best-checkpoint snapshots when score ties current best.
+            if (
+                validation_macro_f1 == current_best
+                and Path(checkpoint_path).name != "checkpoint_best.pt"
+            ):
+                return
+
+        self._best_validation_macro_f1 = validation_macro_f1
+        self._best_checkpoint_path = checkpoint_path
+        self._best_checkpoint_artifact = checkpoint_artifact
+
+        self._mlflow.set_tag("best_validation_macro_f1", float(validation_macro_f1))
+        self._mlflow.set_tag("best_checkpoint_path", checkpoint_path)
+        if checkpoint_artifact is not None:
+            self._mlflow.set_tag("best_checkpoint_artifact", checkpoint_artifact)
+
+    def _register_best_model(self) -> None:
+        """Register the best checkpoint artifact as an MLflow model version."""
+        if (
+            not self._run_active
+            or self._mlflow is None
+            or self._active_run_id is None
+            or self._best_checkpoint_artifact is None
+        ):
+            return
+
+        model_name = _model_registry_name(self.tracking.experiment_name)
+        model_source = self._mlflow.get_artifact_uri(self._best_checkpoint_artifact)
+        client = self._mlflow.tracking.MlflowClient()
+        try:
+            with contextlib.suppress(Exception):
+                client.create_registered_model(model_name)
+            model_version = client.create_model_version(
+                name=model_name,
+                source=model_source,
+                run_id=self._active_run_id,
+            )
+        except Exception as exc:
+            _TRACKING_LOGGER.warning("Failed to register best model '%s': %s", model_name, exc)
+            return
+
+        self._mlflow.set_tag("best_model_uri", model_source)
+        self._mlflow.set_tag("best_registered_model_name", model_name)
+        self._mlflow.set_tag("best_registered_model_version", str(model_version.version))
 
     def _cleanup_logged_checkpoints(self) -> None:
         """Delete uploaded local checkpoint files when retention is disabled."""
@@ -525,6 +633,7 @@ class MlflowRunTracker:
         step = payload.get("step")
         loss = payload.get("loss")
         validation_macro_f1 = payload.get("validation_macro_f1")
+        metric_phase = _infer_metric_phase(payload)
 
         flattened_metrics = _flatten_numeric_metrics(metrics) if metrics else {}
         flattened_metrics.update(_extract_phase_performance_metrics(payload))
@@ -538,6 +647,7 @@ class MlflowRunTracker:
             epoch=int(epoch) if epoch is not None else None,
             step=int(step) if step is not None else None,
             extra_metrics=flattened_metrics if flattened_metrics else None,
+            metric_phase=metric_phase,
         )
 
         decisions_payload = _extract_decisions(payload)
@@ -550,6 +660,7 @@ class MlflowRunTracker:
         """End the active MLflow run if one was started."""
         if self._run_active and self._mlflow is not None:
             try:
+                self._register_best_model()
                 self._mlflow.end_run()
             finally:
                 self._cleanup_logged_checkpoints()
@@ -557,8 +668,13 @@ class MlflowRunTracker:
                 self._mlflow = None
                 os.environ.pop(_ACTIVE_MLFLOW_RUN_ID_ENV, None)
                 self._logged_checkpoint_paths.clear()
+                self._logged_checkpoint_artifacts.clear()
                 self._latest_checkpoint_tag_value = None
                 self._logged_checkpoint_artifact_value = None
+                self._active_run_id = None
+                self._best_validation_macro_f1 = None
+                self._best_checkpoint_path = None
+                self._best_checkpoint_artifact = None
 
 
 def build_mlflow_tracker(experiment_config: ExperimentConfig, run_name: str) -> MlflowRunTracker:
@@ -587,6 +703,71 @@ def _flatten_numeric_metrics(value: Mapping[str, Any], prefix: str = "") -> dict
         elif isinstance(item, int | float) and not isinstance(item, bool):
             flattened[metric_name] = float(item)
     return flattened
+
+
+def _normalize_metric_phase(value: str | None) -> str | None:
+    """Normalize metric phase aliases to stable prefixes used in metric names."""
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"train", "training"}:
+        return "training"
+    if normalized in {"val", "valid", "validation"}:
+        return "val"
+    if normalized == "test":
+        return "test"
+    return None
+
+
+def _infer_metric_phase(payload: Mapping[str, Any]) -> str | None:
+    """Infer metric phase from payload metadata or prediction artifact naming."""
+    declared = payload.get("metric_phase")
+    if isinstance(declared, str):
+        normalized = _normalize_metric_phase(declared)
+        if normalized is not None:
+            return normalized
+
+    prediction_artifact = payload.get("prediction_artifact")
+    if isinstance(prediction_artifact, str):
+        if "test_predictions" in prediction_artifact:
+            return "test"
+        if "validation_predictions" in prediction_artifact:
+            return "val"
+
+    return None
+
+
+def _normalize_metric_name(metric_name: str, metric_phase: str | None) -> str:
+    """Convert metric names to phase-aware naming (training/val/test)."""
+    if metric_name == "loss":
+        if metric_phase in {"val", "test"}:
+            return f"{metric_phase}_loss"
+        return "training_loss"
+    if metric_name.startswith("validation_"):
+        metric_name = f"val_{metric_name.removeprefix('validation_')}"
+    elif metric_name.startswith("train_"):
+        metric_name = f"training_{metric_name.removeprefix('train_')}"
+
+    if (
+        metric_phase is not None
+        and "." not in metric_name
+        and not metric_name.startswith(("training_", "val_", "test_"))
+        and metric_name not in {"epoch", "step"}
+    ):
+        return f"{metric_phase}_{metric_name}"
+
+    return metric_name
+
+
+def _normalize_metric_names(
+    metrics: Mapping[str, float],
+    metric_phase: str | None,
+) -> dict[str, float]:
+    """Normalize all metric names to include explicit phase semantics."""
+    normalized: dict[str, float] = {}
+    for key, value in metrics.items():
+        normalized[_normalize_metric_name(key, metric_phase)] = float(value)
+    return normalized
 
 
 def _extract_phase_performance_metrics(payload: Mapping[str, Any]) -> dict[str, float]:
@@ -641,9 +822,39 @@ def _extract_decisions(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {key: payload[key] for key in keys if key in payload}
 
 
-def _checkpoint_artifact_path(checkpoint: Path) -> str:
+def _checkpoint_step_from_path(checkpoint: Path) -> int | None:
+    """Extract a training step from a checkpoint filename when available."""
+    match = _CHECKPOINT_STEP_PATTERN.match(checkpoint.name)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def _checkpoint_artifact_path(
+    checkpoint: Path,
+    keep_last_n: int,
+    step: int | None,
+) -> str:
     """Return a stable MLflow artifact path for a checkpoint file."""
     component = checkpoint.parent.name
     if component in {"gate", "command", "non_command", "shared_two_head"}:
-        return f"checkpoints/{component}/{checkpoint.name}"
-    return f"checkpoints/{checkpoint.name}"
+        prefix = f"checkpoints/{component}"
+    else:
+        prefix = "checkpoints"
+
+    if checkpoint.name == "checkpoint_best.pt":
+        return f"{prefix}/{checkpoint.name}"
+
+    if step is None:
+        return f"{prefix}/{checkpoint.name}"
+
+    slot = step % max(1, keep_last_n)
+    return f"{prefix}/rolling/checkpoint_slot_{slot}.pt"
+
+
+def _model_registry_name(experiment_name: str) -> str:
+    """Return a registry-safe model name for best-checkpoint registration."""
+    sanitized = re.sub(r"[^A-Za-z0-9_.-]+", "-", experiment_name).strip("-._")
+    if not sanitized:
+        sanitized = "speech-recognition"
+    return f"{sanitized}-best"

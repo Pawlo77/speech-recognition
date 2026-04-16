@@ -47,6 +47,28 @@ GATE_NON_COMMAND_LABEL: str = "__non_command__"
 for two-stage detection strategies."""
 
 
+def _shared_two_head_probs_from_logits(logits: np.ndarray) -> list[list[float]]:
+    """Combine shared-two-head logits into 12-class probabilities."""
+    cmd_logits = logits[:, : len(COMMAND_LABELS)]
+    nc_logits = logits[:, len(COMMAND_LABELS) :]
+
+    cmd_shifted = cmd_logits - cmd_logits.max(axis=1, keepdims=True)
+    nc_shifted = nc_logits - nc_logits.max(axis=1, keepdims=True)
+    cmd_probs = np.exp(cmd_shifted)
+    nc_probs = np.exp(nc_shifted)
+    cmd_probs /= cmd_probs.sum(axis=1, keepdims=True)
+    nc_probs /= nc_probs.sum(axis=1, keepdims=True)
+
+    cmd_conf = cmd_probs.max(axis=1, keepdims=True)
+    nc_conf = nc_probs.max(axis=1, keepdims=True)
+    denom = np.clip(cmd_conf + nc_conf, a_min=1e-8, a_max=None)
+
+    combined = np.zeros((logits.shape[0], len(ALL_LABELS)), dtype=np.float32)
+    combined[:, : len(COMMAND_LABELS)] = (cmd_conf / denom) * cmd_probs
+    combined[:, len(COMMAND_LABELS) :] = (nc_conf / denom) * nc_probs
+    return combined.tolist()
+
+
 class _RuntimeUnknownBlender(UnknownSampleGenerationMixin):
     """Runtime adapter for reusing dataset unknown-sample blending logic."""
 
@@ -133,16 +155,17 @@ def _load_split_records(dataset_root: Path, split_name: str) -> list[AudioRecord
         return []
     audio_root = dataset_root / "train" / "audio"
     records: list[AudioRecord] = []
-    for line in split_file.read_text(encoding="utf-8").splitlines():
-        rel_path = line.strip()
-        if not rel_path:
-            continue
-        sample_path = audio_root / rel_path
-        label = _normalize_label(Path(rel_path).parts[0])
-        if label not in ALL_LABELS:
-            continue
-        if sample_path.exists():
-            records.append(AudioRecord(path=sample_path, label=label))
+    with split_file.open(encoding="utf-8") as handle:
+        for line in handle:
+            rel_path = line.strip()
+            if not rel_path:
+                continue
+            sample_path = audio_root / rel_path
+            label = _normalize_label(Path(rel_path).parts[0])
+            if label not in ALL_LABELS:
+                continue
+            if sample_path.exists():
+                records.append(AudioRecord(path=sample_path, label=label))
     return records
 
 
@@ -701,11 +724,21 @@ def _fit_model(
     fit_payload = engine.fit(train_loader, val_loader, tracker=tracker)
     fit_time_ms = (perf_counter() - t0) * 1000.0
     if tracker is not None:
+        validation_macro_f1 = fit_payload.get("validation_macro_f1")
+        validation_loss = fit_payload.get("validation_loss")
         tracker.log_training_metrics(
             epoch=int(fit_payload.get("epoch", config.training.epochs)),
             step=int(fit_payload.get("step", 0)),
+            validation_macro_f1=(
+                float(validation_macro_f1) if validation_macro_f1 is not None else None
+            ),
             extra_metrics={
                 "training_elapsed_ms": float(fit_time_ms),
+                **(
+                    {"validation_loss": float(validation_loss)}
+                    if validation_loss is not None
+                    else {}
+                ),
             },
         )
     return engine, fit_payload

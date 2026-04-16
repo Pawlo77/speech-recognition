@@ -13,6 +13,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
+import humanize
 import numpy as np
 import torch
 from torch import Tensor, nn
@@ -23,6 +24,8 @@ from ..config import TrainingControlConfig
 _CHECKPOINT_PATTERN = re.compile(r"^checkpoint_step_(\d+)$")
 """Regular expression pattern for validating and extracting
 step numbers from checkpoint filenames."""
+_BEST_CHECKPOINT_FILENAME = "checkpoint_best.pt"
+"""Filename used for the best validation checkpoint snapshot."""
 _TRAIN_MAX_STEPS_ENV = "SPEECH_TRAIN_MAX_STEPS"
 """Environment variable name for an optional max training step override,
 used for smoke checks."""
@@ -97,7 +100,7 @@ class TrainingEngine:
     """Training hyperparameter configuration."""
     checkpoint_dir: Path
     """Directory for storing training checkpoints."""
-    keep_last_n: int = 2
+    keep_last_n: int = 1
     """Number of recent checkpoints to retain on disk."""
     device: torch.device = field(default_factory=lambda: select_training_device())
     """Device for training (MPS, CUDA, or CPU)."""
@@ -161,6 +164,10 @@ class TrainingEngine:
         """Return the path for a numbered checkpoint file."""
         return self.checkpoint_dir / f"checkpoint_step_{step:010d}.pt"
 
+    def _best_checkpoint_path(self) -> Path:
+        """Return the path for the dedicated best-checkpoint file."""
+        return self.checkpoint_dir / _BEST_CHECKPOINT_FILENAME
+
     def _sorted_checkpoint_paths(self) -> list[Path]:
         """Return valid checkpoint paths sorted by step number ascending."""
 
@@ -207,6 +214,22 @@ class TrainingEngine:
         self._atomic_torch_save(checkpoint.to_dict(), checkpoint_path)
         self._prune_old_checkpoints()
         return checkpoint_path
+
+    def save_best_checkpoint(self, epoch: int, step: int) -> Path:
+        """Persist a dedicated best-checkpoint snapshot and return its path."""
+        checkpoint = TrainingCheckpoint(
+            model_state_dict=self.model.state_dict(),
+            optimizer_state_dict=self.optimizer.state_dict(),
+            scheduler_state_dict=(
+                self.scheduler.state_dict() if self.scheduler is not None else None
+            ),
+            rng_state=self._capture_rng_state(),
+            epoch=epoch,
+            step=step,
+        )
+        best_checkpoint_path = self._best_checkpoint_path()
+        self._atomic_torch_save(checkpoint.to_dict(), best_checkpoint_path)
+        return best_checkpoint_path
 
     def _load_checkpoint_payload(self, path: Path) -> TrainingCheckpoint:
         """Load and validate a checkpoint payload from disk."""
@@ -317,7 +340,7 @@ class TrainingEngine:
             _ = len(val_loader)
 
         logger = logging.getLogger(__name__)
-        checkpoint_interval = max(1, self.training_config.log_every_n_steps)
+        checkpoint_interval = max(1, self.training_config.checkpoint_every_n_steps)
 
         steps_per_epoch = len(train_loader)
         if steps_per_epoch <= 0:
@@ -336,6 +359,7 @@ class TrainingEngine:
 
         last_validation: dict[str, float] = {}
         last_checkpoint_path: Path | None = None
+        best_checkpoint_path: Path | None = None
         stop_training = False
         best_validation_macro_f1 = float("-inf")
         epochs_without_improvement = 0
@@ -358,6 +382,7 @@ class TrainingEngine:
                     latest_checkpoint is not None,
                     steps_this_epoch,
                 )
+
                 for batch_index, batch in tqdm(
                     enumerate(train_loader),
                     total=steps_this_epoch,
@@ -366,42 +391,57 @@ class TrainingEngine:
                 ):
                     if epoch == start_epoch and batch_index < batch_offset:
                         continue
+
                     loss_value = self._train_batch(batch)
                     global_step += 1
                     should_log_step = (
                         self.training_config.log_every_n_steps > 0
                         and global_step % self.training_config.log_every_n_steps == 0
                     )
-                    if (
-                        should_log_step
-                        and tracker is not None
-                        and hasattr(tracker, "log_training_metrics")
-                    ):
-                        try:
-                            learning_rate = (
-                                float(self.optimizer.param_groups[0].get("lr", 0.0))
-                                if self.optimizer.param_groups
-                                else 0.0
-                            )
-                            tracker.log_training_metrics(
-                                loss=loss_value,
-                                epoch=epoch + 1,
-                                step=global_step,
-                                extra_metrics={"learning_rate": learning_rate},
-                            )
-                        except Exception:
-                            logger.exception("tracker.log_training_metrics failed")
                     if should_log_step:
+                        learning_rate = (
+                            float(self.optimizer.param_groups[0].get("lr", 0.0))
+                            if self.optimizer.param_groups
+                            else 0.0
+                        )
+                        if tracker is not None and hasattr(tracker, "log_training_metrics"):
+                            try:
+                                tracker.log_training_metrics(
+                                    loss=loss_value,
+                                    epoch=epoch + 1,
+                                    step=global_step,
+                                    extra_metrics={"learning_rate": learning_rate},
+                                )
+                            except Exception:
+                                logger.exception("tracker.log_training_metrics failed")
+
                         logger.info(
-                            "[train] epoch=%d/%d step=%d loss=%.6f",
+                            "[train] epoch=%d/%d step=%d loss=%.6f learning_rate=%.8f",
                             epoch + 1,
                             self.training_config.epochs,
                             global_step,
                             loss_value,
+                            learning_rate,
                         )
 
                     if global_step % checkpoint_interval == 0:
                         last_checkpoint_path = self.save_checkpoint(epoch=epoch, step=global_step)
+                        logger.info(
+                            "[train] saved checkpoint at step %d epoch %d to %s",
+                            global_step,
+                            epoch + 1,
+                            str(last_checkpoint_path)[-30:],
+                        )
+                        if tracker is not None and hasattr(tracker, "log_training_metrics"):
+                            try:
+                                tracker.log_training_metrics(
+                                    checkpoint_path=str(last_checkpoint_path),
+                                    epoch=epoch + 1,
+                                    step=global_step,
+                                )
+                            except Exception:
+                                logger.exception("tracker.log_training_metrics failed")
+
                     if max_train_steps is not None and global_step >= max_train_steps:
                         logger.info(
                             (
@@ -412,15 +452,18 @@ class TrainingEngine:
                         )
                         stop_training = True
                         break
+
                 batch_offset = 0
                 validation_started_at = perf_counter()
                 validation_time_ms = 0.0
+                improved_validation = False
                 if val_loader is not None:
                     logger.info(
                         "[train] starting validation for epoch %d/%d",
                         epoch + 1,
                         self.training_config.epochs,
                     )
+
                     last_validation = self.evaluate(val_loader)
                     validation_time_ms = (perf_counter() - validation_started_at) * 1000.0
                     logger.info(
@@ -442,14 +485,16 @@ class TrainingEngine:
                                 epoch=epoch + 1,
                                 step=global_step,
                                 extra_metrics={
-                                    "validation_loss": last_validation.get("validation_loss", 0.0)
+                                    "validation_loss": last_validation.get("validation_loss", 0.0),
                                 },
                             )
                         except Exception:
                             logger.exception("tracker.log_training_metrics failed")
+
                     current_validation_macro_f1 = last_validation.get("validation_macro_f1", 0.0)
                     if current_validation_macro_f1 > best_validation_macro_f1:
                         best_validation_macro_f1 = current_validation_macro_f1
+                        improved_validation = True
                         epochs_without_improvement = 0
                     else:
                         epochs_without_improvement += 1
@@ -466,26 +511,47 @@ class TrainingEngine:
                                 epochs_without_improvement,
                             )
                             stop_training = True
+
                 if self.scheduler is not None:
                     scheduler_step = getattr(self.scheduler, "step", None)
                     if callable(scheduler_step):
-                        if last_validation and hasattr(self.scheduler, "optimizer"):
-                            try:
-                                scheduler_step(last_validation.get("validation_loss", 0.0))
-                            except TypeError:
-                                scheduler_step()
+                        # Only ReduceLROnPlateau consumes a validation metric.
+                        if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                            scheduler_step(last_validation.get("validation_loss", 0.0))
                         else:
                             scheduler_step()
+
                 last_checkpoint_path = self.save_checkpoint(epoch=epoch + 1, step=global_step)
+                if improved_validation:
+                    best_checkpoint_path = self.save_best_checkpoint(
+                        epoch=epoch + 1,
+                        step=global_step,
+                    )
+                    logger.info(
+                        "[train] saved best checkpoint at step %d epoch %d to %s",
+                        global_step,
+                        epoch + 1,
+                        str(best_checkpoint_path),
+                    )
+                    if tracker is not None and hasattr(tracker, "log_training_metrics"):
+                        try:
+                            tracker.log_training_metrics(
+                                validation_macro_f1=current_validation_macro_f1,
+                                checkpoint_path=str(best_checkpoint_path),
+                                epoch=epoch + 1,
+                                step=global_step,
+                            )
+                        except Exception:
+                            logger.exception("tracker.log_training_metrics failed")
                 epoch_elapsed_ms = (perf_counter() - epoch_started_at) * 1000.0
                 logger.info(
-                    "[train] completed epoch %d/%d global_step=%d epoch_elapsed_ms=%.2f "
-                    "validation_elapsed_ms=%.2f",
+                    "[train] completed epoch %d/%d global_step=%d epoch_elapsed=%s "
+                    "validation_elapsed=%s",
                     epoch + 1,
                     self.training_config.epochs,
                     global_step,
-                    epoch_elapsed_ms,
-                    validation_time_ms,
+                    humanize.naturaldelta(epoch_elapsed_ms / 1000.0),
+                    humanize.naturaldelta(validation_time_ms / 1000.0),
                 )
                 if tracker is not None and hasattr(tracker, "log_training_metrics"):
                     try:
@@ -495,6 +561,10 @@ class TrainingEngine:
                             ),
                             epoch=epoch + 1,
                             step=global_step,
+                            extra_metrics={
+                                "epoch_elapsed_ms": epoch_elapsed_ms,
+                                "validation_elapsed_ms": validation_time_ms,
+                            },
                         )
                     except Exception:
                         logger.exception("tracker.log_training_metrics failed")
@@ -503,12 +573,22 @@ class TrainingEngine:
                     break
             except KeyboardInterrupt:
                 last_checkpoint_path = self.save_checkpoint(epoch=epoch, step=global_step)
+                if tracker is not None and hasattr(tracker, "log_training_metrics"):
+                    try:
+                        tracker.log_training_metrics(
+                            checkpoint_path=str(last_checkpoint_path),
+                            epoch=epoch + 1,
+                            step=global_step,
+                        )
+                    except Exception:
+                        logger.exception("tracker.log_training_metrics failed")
                 raise
 
         return {
             "epoch": completed_epoch,
             "step": global_step,
             "checkpoint_path": str(last_checkpoint_path) if last_checkpoint_path else None,
+            "best_checkpoint_path": str(best_checkpoint_path) if best_checkpoint_path else None,
             **last_validation,
         }
 
