@@ -57,6 +57,8 @@ This procedure avoids duplicating the same synthetic sample and keeps the non-co
 
 For extended splits, unknown candidates are deduplicated by audio-content hash first; if the unknown pool is still too small, synthetic unknowns are generated as a top-up until split targets are met (or generation attempts are exhausted).
 
+> Processed data is available to download [here](https://drive.google.com/file/d/1JQWE1FzGAgmkUEjxcMypmxw2vhmNqOgP/view?usp=sharing) for anyone who wants to skip the preprocessing step. The [train_split_eda.ipynb](notebooks/train_split_eda.ipynb) will create the same split artifacts if you want to inspect the raw data and run the preprocessing yourself.
+
 ## Feature Extraction and Model Adapters
 
 Feature extraction is implemented as composable PyTorch `nn.Module`s backed by `torchaudio`.
