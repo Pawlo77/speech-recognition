@@ -285,7 +285,8 @@ def build_phase_three_trials() -> tuple[PhaseThreeTrialSpec, ...]:
         *_build_ast_trials(seeds),
         *_build_convnext_trials(seeds),
         *_build_ssamba_trials(seeds),
-        *_build_xlstm_trials(seeds),
+        # xLSTM is excluded from phase 3 because of current computational constraints.
+        # *_build_xlstm_trials(seeds),
         *_build_mlp_mixer_trials(seeds),
     )
 

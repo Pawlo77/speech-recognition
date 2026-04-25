@@ -107,7 +107,7 @@ Split usage is fixed by the dataset protocol in Section~\ref{sec:dataset}: Phase
 
 \begin{table}[htbp]
 \centering
-\caption{Estimated trial executions per experimental phase (one trial may train multiple internal components).}
+\caption{Executed trial scope per experimental phase (one trial may train multiple internal components).}
 \label{tab:model_calls}
 \small
 \begin{tabular}{@{} p{0.7cm} p{3.5cm} >{\centering\arraybackslash}p{0.8cm} >{\centering\arraybackslash}p{0.5cm} >{\centering\arraybackslash}p{0.8cm} @{}}
@@ -115,9 +115,9 @@ Split usage is fixed by the dataset protocol in Section~\ref{sec:dataset}: Phase
 \textbf{Phase} & \textbf{Experiment Scope} & \textbf{Configs} & \textbf{Seeds} & \textbf{Total Runs} \\ \midrule
 \textbf{$1$} & Feature Strategy Ablation \newline ($5$ features $\times$ $2$ proxy models) & $10$ & $3$ & $30$ \\
 \textbf{$2$} & Global Hyperparameter Tuning \newline (best feature $\times$ $2$ proxies $\times$ $4$ optim. combos) & $8$ & $3$ & $24$ \\
-\textbf{$3$} & Inductive Bias Comparison \newline (AST: $8$, ConvNeXt: $2$, SSAMBA: $8$, xLSTM: $8$, MLP-Mixer: $4$) & $30$ & $3$ & $90$ \\
+\textbf{$3$} & Inductive Bias Comparison \newline (AST: $8$, ConvNeXt: $2$, SSAMBA: $8$, MLP-Mixer: $4$; planned xLSTM excluded) & $22$ & $3$ & $66$ \\
 \textbf{$4$} & Non-Command Method Comparison \newline ($5$ strategies $\times$ $3$ top models on \texttt{\_\_unknown\_\_}/\texttt{\_\_silence\_\_}) & $15$ & $3$ & $45$ \\ \midrule
-\textbf{Total} & \textbf{Cumulative Trial Executions} & \textbf{$63$} & & \textbf{$189$} \\ \bottomrule
+\textbf{Total} & \textbf{Cumulative Trial Executions} & \textbf{$55$} & & \textbf{$165$} \\ \bottomrule
 \end{tabular}
 \end{table}
 
@@ -166,7 +166,7 @@ Mel + SpecAugment & $1024$ & $160$ & $64$ ms & $10$ ms & $101$ & $128$ mels & $1
 \subsection{Phases 2 \& 3: Architectural Bias and Optimization (Q2)}
 To isolate structural effects, we train all models entirely from random initialization. Rather than asking which pre-training source transfers best, this design evaluates which architecture learns most effectively from the supervision signal itself.
 
-Phase $2$ tunes the global AdamW configuration (Table~\ref{tab:global_hyperparams}) on the best Phase $1$ feature set. Phase $3$ then sweeps model-specific hyperparameters (Table~\ref{tab:model_hyperparams}) using the winning Phase $2$ optimizer settings across $5$ distinct families:
+Phase $2$ tunes the global AdamW configuration (Table~\ref{tab:global_hyperparams}) on the best Phase $1$ feature set. Phase $3$ then sweeps model-specific hyperparameters (Table~\ref{tab:model_hyperparams}) using the winning Phase $2$ optimizer settings across the executed families. The original plan also included xLSTM as a high-capacity recurrent comparator, but it was excluded from Phase $3$ execution after Phases $1$ and $2$: relative to ConvNeXt, xLSTM showed weaker proxy-stage behavior while requiring more than $10\times$ longer training time.
 
 % TODO: Add visual comparison of the structural paradigms: Local spatial (ConvNeXt) vs. Global attention (AST) vs. Sequential state tracking (SSAMBA/xLSTM).
 
@@ -174,7 +174,9 @@ Phase $2$ tunes the global AdamW configuration (Table~\ref{tab:global_hyperparam
     \item[AST (Audio Spectrogram Transformer):] Implemented with Hugging Face \texttt{ASTForAudioClassification} (from \texttt{transformers}) using \texttt{ASTConfig} with hidden size $512$, $8$ encoder layers, $8$ attention heads, and intermediate size $2048$ (targeted \textasciitilde{}25M-scale setup in this work). \textit{Key feature / why chosen:} global self-attention from the first layer gives immediate all-to-all context, making AST the explicit ``global dependency'' reference model \cite{vaswani2017attention, gong2021ast}.
     \item[ConvNeXt (Modern CNN):] Implemented as \texttt{torchvision.models.convnext\_tiny} (primary backend), with the first stem convolution adapted to one-channel spectrogram input; \texttt{timm convnext\_tiny} is kept as backend fallback. \textit{Key feature / why chosen:} strong locality and translation-equivariant inductive bias provide the canonical modern CNN baseline against which global and recurrent models are compared \cite{lecun1995convolutional, liu2022convnet}.
     \item[SSAMBA (Selective State Space):] Implemented through \texttt{mamba\_ssm.Mamba} blocks in a repository wrapper (\texttt{MambaHead}), stacked with configuration $d_{\text{model}}=768$, $d_{\text{state}}=64$, $d_{\text{conv}}=4$, expand $=2$, and $6$ layers (targeted \textasciitilde{}25M-scale setup in this work). \textit{Key feature / why chosen:} input-selective state-space updates target long-range sequence modeling with linear-time scaling, representing an efficient alternative to full attention \cite{gu2023mamba,shams2024ssamba}.
-    \item[xLSTM (High-Capacity Recurrence):] Implemented with \texttt{xlstm.xLSTMBlockStack} in a repository wrapper (\texttt{XLSTMHead}), using embedding dimension $704$/$768$ and $8$ blocks (alternating mLSTM/sLSTM placements; targeted \textasciitilde{}25M-scale setup). \textit{Key feature / why chosen:} matrix-memory recurrence $C_t \in \mathbb{R}^{d \times d}$ increases recurrent capacity beyond standard LSTM cells, serving as the high-capacity recurrent comparator \cite{beck2024xlstm}.
+    \item[xLSTM (High-Capacity Recurrence; planned, not executed):] Implemented with \texttt{xlstm.xLSTMBlockStack} in a repository wrapper (\texttt{XLSTMHead}), using embedding dimension $704$/$768$ and $8$ blocks (alternating mLSTM/sLSTM placements; targeted \textasciitilde{}25M-scale setup). \textit{Key feature / why chosen:} matrix-memory recurrence $C_t \in \mathbb{R}^{d \times d}$ increases recurrent capacity beyond standard LSTM cells, serving as the originally planned high-capacity recurrent comparator \cite{beck2024xlstm}.
+
+    \textit{This branch was excluded from Phase $3$ execution because its Phase $1$--$2$ proxy behavior was worse than ConvNeXt while its training time was more than $10\times$ longer.}
     \item[MLP-Mixer:] Implemented as \texttt{timm gmixer\_24\_224} (official gMLP/Mixer-family model) for the MLP-only baseline. \textit{Key feature / why chosen:} token/channel mixing via dense projections with no explicit convolutional or recurrent prior acts as an architectural ``minimal prior'' control \cite{tolstikhin2021mlpmixer}.
 \end{description}
 
@@ -197,7 +199,7 @@ LR scheduler & Cosine Annealing with Warmup / Reduce LR on Plateau & Swept sched
 
 \begin{table*}[htbp]
 \centering
-\caption{Model-specific hyperparameter sweeps (Phase $3$), including architecture type and parameter count from the repo-specific adapters used in this work (default non-pretrained configuration, $12$ output classes).}
+\caption{Model-specific hyperparameter sweeps (Phase $3$), including architecture type and parameter count from the repo-specific adapters used in this work (default non-pretrained configuration, $12$ output classes). xLSTM is retained as planned scope but excluded from executed runs.}
 \label{tab:model_hyperparams}
 \small
 \begin{tabular}{@{}p{1.8cm} p{4.1cm} p{1.8cm} p{8.0cm}@{}}
@@ -206,7 +208,7 @@ LR scheduler & Cosine Annealing with Warmup / Reduce LR on Plateau & Swept sched
 \textbf{AST} & Transformer (global attention) & $25{,}416{,}204$ & Dropout $\{0.1, 0.5\}$; Head \{linear, MLP(256)\}; Pos. Emb. \{interp., learned\}; fixed size: hidden $=512$, layers $=8$, heads $=8$, intermediate $=2048$ \cite{gong2021ast} \\
 \textbf{ConvNeXt} & CNN (local spatial hierarchy) & $27{,}826{,}284$ & Stoch. Depth $\{0.0, 0.2\}$; Kernel size $\{7\times7\}$ \cite{liu2022convnet} \\
 \textbf{SSAMBA} & State-space sequence model & $23{,}963{,}148$ & Pooling \{mean, max\}; CLS \{yes, no\}; Stride $\{10\text{ms}, 5\text{ms}\}$; fixed size: $d_{\text{model}}=768$, $d_{\text{state}}=64$, expand $=2$, layers $=6$ \cite{gu2023mamba,shams2024ssamba} \\
-\textbf{xLSTM} & Recurrent sequence model & $24{,}259{,}180$ & Dim $d \in \{704, 768\}$; State Reset \{T, F\}; Output \{final, mean\}; fixed depth: blocks $=8$ \cite{beck2024xlstm} \\
+\textbf{xLSTM} & Recurrent sequence model & $24{,}259{,}180$ & Planned only; excluded from executed Phase $3$ runs after weaker Phase $1$--$2$ proxy behavior than ConvNeXt and more than $10\times$ longer training time. Original sweep: Dim $d \in \{704, 768\}$; State Reset \{T, F\}; Output \{final, mean\}; fixed depth: blocks $=8$ \cite{beck2024xlstm} \\
 \textbf{MLP-Mixer} & MLP-only token/channel mixer & $24{,}144{,}108$ & Dropout $\{0.0, 0.2\}$; Head L2 Norm \{yes, no\}; default timm variant: \texttt{gmixer\_24\_224} \cite{tolstikhin2021mlpmixer} \\ \bottomrule
 \end{tabular}
 \end{table*}
@@ -238,7 +240,9 @@ and use silence false-trigger rate and unknown-to-command leakage as tie-breaker
 
 The outputs of Phase $4$ define the final deployable systems and are the only systems advanced to held-out test-set validation. Strategy $4$ is executed as one trial configuration that internally trains separate gate, command, and non-command components; Table~\ref{tab:model_calls} reports trial-level counts rather than internal component fits. We evaluate $3$ inference flows: (i) single-stage multiclass flow (input $\rightarrow$ one model $\rightarrow$ class), (ii) two-stage detector flow (input $\rightarrow$ binary gate and branch experts $\rightarrow$ gate-weighted probability fusion), and (iii) shared-backbone two-head flow (input $\rightarrow$ shared encoder $\rightarrow$ command head and non-command head, with a fixed decision rule).
 
-\section{Strict Reproducibility and Training Control}
+\section{Executed Scope, Reproducibility, and Training Control}
+The original experimental plan defined a four-phase funnel: feature strategy selection, global optimizer tuning, architecture comparison, and final non-command handling. The executed scope keeps this structure intact for Phases $1$, $2$, and $4$, while Phase $3$ is narrowed to AST, ConvNeXt, SSAMBA, and MLP-Mixer. The xLSTM branch remains part of the planned design and repository implementation, but it is explicitly excluded from the executed Phase $3$ sweep because its Phase $1$--$2$ proxy behavior was worse than ConvNeXt while training took more than $10\times$ longer. Consequently, the executed Phase $3$ grid contains $22$ configurations ($66$ seeded runs), rather than the originally planned $30$ configurations ($90$ seeded runs).
+
 To account for hardware-level non-determinism during GPU acceleration, we execute every experiment three separate times using fixed starting points (seeds $0$, $42$, and $2003$) and report aggregated results (mean $\pm$ standard deviation).
 
 All experiments are run on a single Apple MacBook Pro with an M4 Pro chip, $48$ GB unified memory, and a $1024$ GB SSD. This hardware budget motivates the use of \texttt{train\_small} and \texttt{valid\_small} in Phases $1$--$3$.
