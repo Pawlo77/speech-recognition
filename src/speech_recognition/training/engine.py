@@ -106,6 +106,8 @@ class TrainingEngine:
     """Device for training (MPS, CUDA, or CPU)."""
     use_mixed_precision: bool | None = None
     """Whether to use mixed precision training (None = use config value)."""
+    mps_autocast_dtype: torch.dtype = torch.float16
+    """Autocast dtype to use on MPS when mixed precision is enabled."""
     loss_fn: nn.Module = field(default_factory=nn.CrossEntropyLoss)
     """Loss function for training."""
 
@@ -125,7 +127,7 @@ class TrainingEngine:
             return nullcontext()
 
         if self.device.type == "mps":
-            return torch.autocast(device_type="mps", dtype=torch.float16)
+            return torch.autocast(device_type="mps", dtype=self.mps_autocast_dtype)
         if self.device.type == "cpu":
             return torch.autocast(device_type="cpu", dtype=torch.bfloat16)
         return nullcontext()

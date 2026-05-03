@@ -41,10 +41,22 @@ def _phase_three_package() -> Any:
 
 
 def _build_phase_three_trials() -> tuple[Any, ...]:
-    """Return the list of trial specifications for the phase-3 sweep."""
+    """Return the list of trial specifications for the phase-3 sweep.
+
+    SSamba trials are slow on the macOS Mamba backend (no fused parallel
+    scan), so they are scheduled last. This keeps faster families churning
+    while the long-running ones happen at the end. Trial identities and
+    parameters are unchanged; only execution order is affected.
+    """
     package = _phase_three_package()
     builder = getattr(package, "build_phase_three_trials", build_phase_three_trials)
-    return builder()
+    trials = builder()
+    return tuple(
+        sorted(
+            trials,
+            key=lambda trial: (1 if getattr(trial, "family", "") == "ssamba" else 0,),
+        )
+    )
 
 
 def _run_subprocess(command: list[str], env: Mapping[str, str], check: bool) -> Any:

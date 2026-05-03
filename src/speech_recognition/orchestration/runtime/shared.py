@@ -710,6 +710,13 @@ def _fit_model(
         weight_decay=config.optimizer.weight_decay,
     )
     scheduler = _build_scheduler(config, optimizer)
+    # SSamba's fp16 GEMV path triggers a Metal kernel assertion ("LORADOWN
+    # GEMV Kernel - matrixRowPadElements will overflow its fc bit allocation").
+    # Use bf16 autocast on MPS instead, which exercises a different kernel and
+    # keeps mixed-precision throughput. Other families/devices are unchanged.
+    mps_autocast_dtype: torch.dtype = torch.float16
+    if getattr(config.model, "family", None) == "ssamba" and torch.backends.mps.is_available():
+        mps_autocast_dtype = torch.bfloat16
     engine = TrainingEngine(
         model=model,
         optimizer=optimizer,
@@ -718,6 +725,7 @@ def _fit_model(
         checkpoint_dir=checkpoint_dir,
         keep_last_n=config.checkpointing.keep_last_n,
         loss_fn=loss_fn or nn.CrossEntropyLoss(),
+        mps_autocast_dtype=mps_autocast_dtype,
     )
 
     t0 = perf_counter()

@@ -284,7 +284,9 @@ def build_phase_three_trials() -> tuple[PhaseThreeTrialSpec, ...]:
     return (
         *_build_ast_trials(seeds),
         *_build_convnext_trials(seeds),
-        *_build_ssamba_trials(seeds),
+        # SSAMBA is excluded from phase 3 because the macOS Mamba backend lacks a
+        # fused parallel scan, making per-epoch wall-clock infeasible (>3 hours).
+        # *_build_ssamba_trials(seeds),
         # xLSTM is excluded from phase 3 because of current computational constraints.
         # *_build_xlstm_trials(seeds),
         *_build_mlp_mixer_trials(seeds),
