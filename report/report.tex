@@ -6,6 +6,8 @@
 \usepackage{tabularx}
 \usepackage{array}
 
+\graphicspath{{../notebooks/plots/}}
+
 \title{Kaggle TensorFlow Speech Recognition Challenge}
 
 \author[affiliation={1}]{Paweł}{Pozorski}
@@ -105,7 +107,7 @@ Another factor to consider is the average spectral content across different comm
 To systematically address our research questions without combinatorial explosion, we filter configurations through a gated, $4$-phase funnel. Each phase selects the best setup based on macro-F1 across $3$ fixed random seeds, and this configuration is carried forward to the next stage. Table~\ref{tab:model_calls} outlines the experiment scope and compute budget.
 Split usage is fixed by the dataset protocol in Section~\ref{sec:dataset}: Phases $1$--$3$ use \texttt{small} splits, while Phase $4$ uses \texttt{extended} splits.
 
-\begin{table}[htbp]
+\begin{table}[H]
 \centering
 \caption{Executed trial scope per experimental phase (one trial may train multiple internal components).}
 \label{tab:model_calls}
@@ -173,7 +175,7 @@ Phase $2$ tunes the global AdamW configuration (Table~\ref{tab:global_hyperparam
 \begin{description}
     \item[AST (Audio Spectrogram Transformer):] Implemented with Hugging Face \texttt{ASTForAudioClassification} (from \texttt{transformers}) using \texttt{ASTConfig} with hidden size $512$, $8$ encoder layers, $8$ attention heads, and intermediate size $2048$ (targeted \textasciitilde{}25M-scale setup in this work). \textit{Key feature / why chosen:} global self-attention from the first layer gives immediate all-to-all context, making AST the explicit ``global dependency'' reference model \cite{vaswani2017attention, gong2021ast}.
     \item[ConvNeXt (Modern CNN):] Implemented as \texttt{torchvision.models.convnext\_tiny} (primary backend), with the first stem convolution adapted to one-channel spectrogram input; \texttt{timm convnext\_tiny} is kept as backend fallback. \textit{Key feature / why chosen:} strong locality and translation-equivariant inductive bias provide the canonical modern CNN baseline against which global and recurrent models are compared \cite{lecun1995convolutional, liu2022convnet}.
-    \item[SSAMBA (Selective State Space):] Implemented through \texttt{mamba\_ssm.Mamba} blocks in a repository wrapper (\texttt{MambaHead}), stacked with configuration $d_{\text{model}}=768$, $d_{\text{state}}=64$, $d_{\text{conv}}=4$, expand $=2$, and $6$ layers (targeted \textasciitilde{}25M-scale setup in this work). \textit{Key feature / why chosen:} input-selective state-space updates target long-range sequence modeling with linear-time scaling, representing an efficient alternative to full attention \cite{gu2023mamba,shams2024ssamba}.
+    \item[SSAMBA (Selective State Space; planned, excluded):] Implemented through \texttt{mamba\_ssm.Mamba} blocks in a repository wrapper (\texttt{MambaHead}), stacked with configuration $d_{\text{model}}=768$, $d_{\text{state}}=64$, $d_{\text{conv}}=4$, expand $=2$, and $6$ layers (targeted \textasciitilde{}25M-scale setup in this work). \textit{Key feature / why chosen:} input-selective state-space updates target long-range sequence modeling with linear-time scaling, representing an efficient alternative to full attention \cite{gu2023mamba,shams2024ssamba}.
 
     \textit{This branch was excluded from Phase $3$ execution because was taking over a $3$ hours per training epoch.}
     \item[xLSTM (High-Capacity Recurrence; planned, not executed):] Implemented with \texttt{xlstm.xLSTMBlockStack} in a repository wrapper (\texttt{XLSTMHead}), using embedding dimension $704$/$768$ and $8$ blocks (alternating mLSTM/sLSTM placements; targeted \textasciitilde{}25M-scale setup). \textit{Key feature / why chosen:} matrix-memory recurrence $C_t \in \mathbb{R}^{d \times d}$ increases recurrent capacity beyond standard LSTM cells, serving as the originally planned high-capacity recurrent comparator \cite{beck2024xlstm}.
@@ -258,11 +260,96 @@ Final test reporting covers all completed Phase $4$ trials, since this stage det
 
 Beyond single-model results, we evaluate all ensemble combinations across the $3$ Phase $3$-derived backbones within each fixed Phase $4$ method. Denoting model outputs by $M_1, M_2, M_3$, we test all non-empty subsets (i.e., $2^3 - 1 = 7$ combinations) and aggregate class probabilities by simple averaging under a common within-method calibration rule. Cross-method ensembles are not considered; each ensemble is built from models produced by a single Phase $4$ strategy. These ensemble checks are inference-only and therefore excluded from the cumulative training execution counts in Table~\ref{tab:model_calls}.
 
+\subsection{Phase 1}
+\label{sec:phase1}
+Phase 1 of the experiment focuses on evaluating different feature extraction strategies. Results are reported in terms of macro-F1 scores for each strategy across the two models (ConvNeXt and xLSTM). The results are showed in a heatmap (Figure~\ref{fig:extr_strategy_heatmap}). The heatmap shows mel-spectrograms and mfcc performances are a lot better than the other feature extraction methods, however satisfactory performance is observed only on the ConvNeXt model. xLSTM shows a significant performance drop across all feature extraction strategies, which is the reason to exclude it later phases, as it is not competitive and it is computationally expensive, as mentioned earlier.
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{phase_1_heatmap.png}
+    \caption{Phase 1 results: macro-F1 scores for each feature extraction strategy across the two models.}
+    \label{fig:extr_strategy_heatmap}
+\end{figure}
+
+The main focus in this section is on the results of the global hyperparameter tuning. The best performing optimizer configuration is selected based on the best macro f1 scores and convergence speed. The results are visualized in a bar chart (Figure~\ref{fig:convergence_speed}), which shows the convergence speed of different optimizer configurations. The best perfomining scheduler and weight decay combination on ConvNeXt model is cosine annealing with warmup and weight decay of $10^{-1}$. It achieved the best mean of speed and standard deviation. Weight decay of $10^{-2}$ with the same scheduler showed a lot worse performance, with a significant increase in the convergence time and a higher standard deviation, which indicates a less stable training process.
+
+\subsection{Phase 2}
+\label{sec:phase2}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{phase_2_convergence_speed.png}
+    \caption{Phase 2 results: convergence speed of different optimizer configurations.}
+    \label{fig:convergence_speed}
+\end{figure}
+
+The results from xLSTM model weren't taken as seriously as the performance was significantly worse than ConvNeXt, and all of the combinations showed similar performance. Overall F1 scores were similar for all combinations (Figure~\ref{fig:regularization_sensitivity}).
+
+\subsection{Phase 3}
+\label{sec:phase3}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{phase_3_architecture_distribution.png}
+    \caption{Phase 3 results: architecture distribution of the best performing models.}
+    \label{fig:architecture_distribution}
+\end{figure}
+
+With selected best training setup in phase 1 and phase 2, we proceed to evaluate the models in phase 3. 3 models were evaluated: AST, ConvNeXt and MLP-Mixer. The results are reported in terms of macro-F1 scores for each model across the different hyperparameter configurations (Figure~\ref{fig:architecture_distribution}). Surprisingly, the ConvNeXt model showed the best performance across all configurations and the most stable. AST showed that for some configurations it can achieve a similar performance to ConvNeXt, however the performance was more unstable with a higher standard deviation. MLP-Mixer showed the worst performance across all configurations, with a significant drop in the macro-F1 scores compared to the other two models, despite two similar score it proved to be useless for this task. The failure cases for the best performing models are highlighted in Figure~\ref{fig:failure_highlight}, which shows how often different models were worse than random guessing on specific classes. ConvNeXt showed zero cases, AST only 2, and MLP-Mixer more than $50\%$.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{phase_3_failure_highlight.png}
+    \caption{Phase 3 results: failure cases highlighted for the best performing models.}
+    \label{fig:failure_highlight}
+\end{figure}
+
+
+\subsection{Phase 4}
+\label{sec:phase4}
+Phase 4 focuses on evaluating different strategies for handling non-command classes (unknown and background). Beside of the macro-F1 scores for the non-command classes, we also evaluate the false trigger rate for the silence class and the unknown-to-command leakage, which measures how often unknown samples are misclassified as one of the command classes. The best performing is \textit{flat multiclass} approach, with \textit{loss reweighting} showing a similar performance (Figure~\ref{fig:pareto_front}). \textit{Sampling control} on ConvNeXt also achieved good results, however dropped completly on AST. The worst performing strategy by far was the \textit{two-stage detector}, which showed a significant drop in the command macro-F1 scores, and a very high false trigger rate for the silence class. Similar conclusions can be drawn from Figure~\ref{fig:silence_false_trigger_rate}, which shows the false trigger rate for the silence class across different strategies. The two-stage detector approach showed a significantly higher false trigger rate compared to the other strategies, which is a critical failure mode for KWS systems. The flat multiclass and sampling control approaches showed the lowest false trigger rates, indicating better robustness against misclassifying silence as a command. MLP-Mixer again proved to be a poor choice for this task. Additional comparison of the scores and silence and unknown false trigger rates across different strategies is shown in Figure~\ref{fig:strategy_radar}.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{phase_4_pareto_scatter.png}
+    \caption{Phase 4 results: Command scores vs. Non-command scores for different strategies.}
+    \label{fig:pareto_front}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{phase_4_silence_false_trigger_rate.png}
+    \caption{Phase 4 results: Silence false trigger rates for different strategies.}
+    \label{fig:silence_false_trigger_rate}
+\end{figure}
+
+In terms of efficiency between ConvNeXt and AST, AST required less number of epochs, with median of 40 in comparison to 53 for ConvNeXt (Figure~\ref{fig:training_efficiency_scatter}), however as showed before the maximum and mean performance was better for ConvNeXt.
+
+\subsection{Class comparison}
+To further analyze the performance of the models, we compare the per-class precision, recall, and F1 scores for the best performing model (ConvNeXt with flat multiclass strategy) across the command and non-command classes (Figure~\ref{fig:per_class_heatmap}). For all classes the best model managed to achieve a F1 score above $0.85$, with macro F1 $0.917$. The biggest problems were with ``no" and ``go". The results on the ``unknown" class were very good - almost the highest F1 score among all classes.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{per_class_heatmap.png}
+    \caption{Phase 4 results: Per-class performance for the best performing model.}
+    \label{fig:per_class_heatmap}
+\end{figure}
+
 \section{Conclusion}
-This work defines a reproducible, $4$-phase methodology for studying KWS under controlled conditions, from feature selection and architecture comparison to explicit non-command handling. Final systems are selected in Phase $4$, and the evaluation plan includes both single-model testing and within-method ensemble testing across the $3$ best Phase $3$ backbones. At this stage, the paper serves as a protocol and analysis blueprint rather than a source of empirical claims. Quantitative conclusions about architecture quality and boundary-class behavior will be drawn only after full Phase $4$ selection and held-out test evaluation are completed.
+This study delivers a complete, reproducible $4$-phase benchmark for keyword spotting under a fixed $12$-class formulation ($10$ commands + \texttt{\_\_unknown\_\_} + \texttt{\_\_silence\_\_}). Across the full pipeline, ConvNeXt emerged as the strongest and most stable architecture, with AST as a competitive but less stable alternative and MLP-Mixer consistently underperforming. In feature selection, mel-based front-ends (including MFCC as a strong compact variant) clearly outperformed the remaining candidates. In global optimization tuning, cosine annealing with warmup and stronger weight decay provided the best convergence-quality trade-off for the winning branch.
+
+For non-command handling, the flat multiclass strategy provided the best overall deployment profile, while loss reweighting remained a close alternative. In contrast, the two-stage detector showed a clear failure mode through elevated silence false-trigger behavior, making it unsuitable under the strict command-preservation gate used in this work. Per-class diagnostics further showed that command pairs with higher phonetic similarity (notably ``go/no'' and ``on/off'') remain the main source of residual error, even in the best model.
+
+Methodologically, the main contribution is not only the final ranking but the controlled decision funnel itself: each phase narrows the search space while preserving comparability through fixed seeds, shared optimization controls, and explicit non-command risk metrics (unknown leakage and silence false triggers). Although xLSTM and SSAMBA remain implemented as planned branches, their exclusion from executed Phase $3$ runs is justified by the measured compute-performance trade-off on the target hardware. Overall, the presented protocol and results provide a practical template for building robust KWS systems under realistic resource constraints.
+
+The results indicate that the ConvNeXt model is the best performing model for this task, with the flat multiclass strategy providing the best overall deployment profile. The two-stage detector showed a clear failure mode through elevated silence false-trigger behavior, making it unsuitable under the strict command-preservation gate used in this work. Per-class diagnostics further showed that command pairs with higher phonetic similarity (notably ``go/no'') remain the main source of residual error, even in the best model.
 
 \section{Future Work}
 While this study establishes a strictly controlled baseline for evaluating KWS architectures, several avenues remain for future exploration. First, because our methodology isolates architectural inductive biases by training entirely from random initialization, future work could compare these baselines against pre-trained variants to quantify the performance gains afforded by transfer learning. Second, although our data preprocessing enforces a uniform one-second temporal support, adapting the top-performing architectures to process variable-length inputs or continuous, untrimmed audio streams would better simulate true always-on deployment conditions. Third, while the synthesis of the \texttt{\_\_unknown\_\_} class is currently limited to fixed extended splits, deploying our proposed synthesis pipeline as a dynamic, on-the-fly augmentation mechanism could further harden models against out-of-vocabulary spoken utterances. Finally, our current ensemble evaluation is restricted to within-method combinations; future research could explore cross-method ensembles to determine if heterogeneous non-command handling strategies yield superior robustness against false triggers.
+
+\section{AI Disclosure}
+This report was edited with AI assistance, to improve clarity, consistency, and formatting. Part of the docstrings, some phrasing and code refactoring or debugging were refined using AI tools, but all scientific decisions and interpretations are the authors' own. The core content, experimental design, and analysis were developed by the authors.
+
 
 \bibliographystyle{IEEEtran}
 \bibliography{mybib}
@@ -292,6 +379,27 @@ Figures~\ref{fig:raw_wave_and_spectrogram_1}, \ref{fig:raw_wave_and_spectrogram_
     \includegraphics[width=\linewidth]{../notebooks/plots/spectrogram_example_up.png}
     \caption{Raw wave and spectrogram example from train set for "up".}
     \label{fig:raw_wave_and_spectrogram_3}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{phase_2_regularization_sensitivity.png}
+    \caption{Regularization sensitivity across different configurations.}
+    \label{fig:regularization_sensitivity}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{phase_4_strategy_radar.png}
+    \caption{Score distribution across different strategies.}
+    \label{fig:strategy_radar}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{training_efficiency_scatter.png}
+    \caption{Training efficiency for different strategies.}
+    \label{fig:training_efficiency_scatter}
 \end{figure}
 
 \end{document}
