@@ -166,7 +166,7 @@
 \begin{frame}{Phase 2: Convergence Speed}
     \centering
     \includegraphics[height=0.68\textheight,keepaspectratio]{phase_2_convergence_speed_2col.png}
-    \slidecomment{Cosine annealing with warmup and stronger weight decay gives the best convergence-quality trade-off for the winning branch (on ConvNeXt).}
+    \slidecomment{A lot slower training for xLSTM. Stable convergence for ConvNeXt across all settings, with ReduceLROnPlateau slightly faster than cosine warmup.}
 \end{frame}
 
 \begin{frame}{Phase 3: Architecture Distribution}
@@ -175,16 +175,28 @@
     \slidecomment{ConvNeXt is best and most stable; AST is competitive but less stable; MLP-Mixer is consistently weaker.}
 \end{frame}
 
+\begin{frame}{Phase 3: AST Ablation (Head / Embedding / Dropout)}
+    \centering
+    \includegraphics[height=0.68\textheight,keepaspectratio]{phase_3_ast_ablation.png}
+    \slidecomment{Macro F1 across AST head and embedding pairs, split by dropout; differences are moderate and best configs remain in a similar band.}
+\end{frame}
+
 \begin{frame}{Phase 3: Failure Highlight}
     \centering
     \includegraphics[height=0.68\textheight,keepaspectratio]{phase_3_failure_highlight.png}
-    \slidecomment{Collapse-rate analysis confirms reliability differences: ConvNeXt has the fewest severe failures, MLP-Mixer the most.}
+    \slidecomment{Collapse-rate analysis confirms reliability differences: ConvNeXt has the fewest severe failures, MLP-Mixer the most. Results with $\text{F1}<0.5$, worse than random.}
 \end{frame}
 
 \begin{frame}{Training Efficiency (ConvNeXt vs AST)}
     \centering
     \includegraphics[height=0.68\textheight,keepaspectratio]{training_efficiency_scatter.png}
-    \slidecomment{AST often converges in fewer epochs, but ConvNeXt achieves better mean and best-case final F1.}
+    \slidecomment{AST often converges in fewer epochs, but ConvNeXt has a lot faster total training time and better final F1.}
+\end{frame}
+
+\begin{frame}{Phase 3: Training Loss vs Epoch}
+    \centering
+    \includegraphics[height=0.68\textheight,keepaspectratio]{phase_3_training_loss_vs_epoch.png}
+    \slidecomment{ConvNeXt shows the strongest and most consistent training loss reduction across epochs, AST shows slower and more variable convergence, while MLP-Mixer has the weakest training dynamics.}
 \end{frame}
 
 \begin{frame}{Phase 4: Open-Set Trade-off}
@@ -196,7 +208,7 @@
 \begin{frame}{Phase 4: Silence False Trigger Rate}
     \centering
     \includegraphics[height=0.68\textheight,keepaspectratio]{phase_4_silence_false_trigger_rate.png}
-    \slidecomment{Two-stage detector shows a critical failure mode with elevated silence false triggers, which is unacceptable for always-on KWS.}
+    \slidecomment{Two-stage detector shows a critical failure mode with elevated silence false triggers, which is unacceptable for always-on KWS. Sampling control and flat multiclass have the best silence robustness.}
 \end{frame}
 
 \begin{frame}{Phase 4: Strategy Radar}
@@ -226,9 +238,6 @@
 \begin{frame}[plain]
     \centering
     \Huge \textbf{Thank You}
-    \vspace{1.2em}
-
-    \large Questions?
     \vspace{1.2em}
 
     \normalsize

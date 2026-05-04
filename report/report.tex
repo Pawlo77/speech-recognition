@@ -264,6 +264,8 @@ Beyond single-model results, we evaluate all ensemble combinations across the $3
 \label{sec:phase1}
 Phase 1 of the experiment focuses on evaluating different feature extraction strategies. Results are reported in terms of macro-F1 scores for each strategy across the two models (ConvNeXt and xLSTM). The results are showed in a heatmap (Figure~\ref{fig:extr_strategy_heatmap}). The heatmap shows mel-spectrograms and mfcc performances are a lot better than the other feature extraction methods, however satisfactory performance is observed only on the ConvNeXt model. xLSTM shows a significant performance drop across all feature extraction strategies, which is the reason to exclude it later phases, as it is not competitive and it is computationally expensive, as mentioned earlier.
 
+\subsection{Phase 2}
+\label{sec:phase2}
 
 \begin{figure}
     \centering
@@ -272,10 +274,8 @@ Phase 1 of the experiment focuses on evaluating different feature extraction str
     \label{fig:extr_strategy_heatmap}
 \end{figure}
 
-The main focus in this section is on the results of the global hyperparameter tuning. The best performing optimizer configuration is selected based on the best macro f1 scores and convergence speed. The results are visualized in a bar chart (Figure~\ref{fig:convergence_speed}), which shows the convergence speed of different optimizer configurations. The best perfomining scheduler and weight decay combination on ConvNeXt model is cosine annealing with warmup and weight decay of $10^{-1}$. It achieved the best mean of speed and standard deviation. Weight decay of $10^{-2}$ with the same scheduler showed a lot worse performance, with a significant increase in the convergence time and a higher standard deviation, which indicates a less stable training process.
+The main focus in this section is on the results of the global hyperparameter tuning. The best performing optimizer configuration is selected based on the best macro f1 scores and convergence speed. The results are visualized in a bar chart (Figure~\ref{fig:convergence_speed}), which shows the convergence speed of different optimizer configurations. The results in terms of convergence speed are similar across all configurations, with reduce on plateau showing a slightly faster convergence compared to cosine annealing with warmup. However, the differences are not significant enough to make a clear choice between the two. The weight decay of $10^{-2}$ showed a slightly better performance compared to $10^{-1}$, however again the differences are not significant. Weigth decay $10^{-1}$ showed higher standard deviation on ConvNeXt, which is a sign of instability.
 
-\subsection{Phase 2}
-\label{sec:phase2}
 \begin{figure}[H]
     \centering
     \includegraphics[width=\linewidth]{phase_2_convergence_speed.png}
@@ -304,6 +304,24 @@ With selected best training setup in phase 1 and phase 2, we proceed to evaluate
     \label{fig:failure_highlight}
 \end{figure}
 
+In terms of efficiency between ConvNeXt and AST, ConvNeXt's total training times was singnificantly lower than AST, which paired with its better performance makes it the best choice for this task (Figure~\ref{fig:training_efficiency_scatter}). Analysing the training loss vs epoch for different models (Figure~\ref{fig:training_loss_vs_epoch}), we can see that ConvNeXt showed a more stable and consistent decrease in the training loss compared to AST and MLP-Mixer, which showed more fluctuations and higher final losses.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{phase_3_training_loss_vs_epoch.png}
+    \caption{Phase 3 results: Training loss vs. epoch for different model families.}
+    \label{fig:training_loss_vs_epoch}
+\end{figure}
+
+Hyperparameter sensitivity analysis for AST (Figure~\ref{fig:ast_ablation}) shows consistent mean performance for linear head for both dropout values and positional embedding strategies. For MLP-Mixer, dropout $0.5$ showed a significant drop in the performance compared to dropout $0.1$, which is might be a sign of instability for this model.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{phase_3_ast_ablation.png}
+    \caption{Phase 3 results: Ablation study for AST.}
+    \label{fig:ast_ablation}
+\end{figure}
+
 
 \subsection{Phase 4}
 \label{sec:phase4}
@@ -322,8 +340,6 @@ Phase 4 focuses on evaluating different strategies for handling non-command clas
     \caption{Phase 4 results: Silence false trigger rates for different strategies.}
     \label{fig:silence_false_trigger_rate}
 \end{figure}
-
-In terms of efficiency between ConvNeXt and AST, AST required less number of epochs, with median of 40 in comparison to 53 for ConvNeXt (Figure~\ref{fig:training_efficiency_scatter}), however as showed before the maximum and mean performance was better for ConvNeXt.
 
 \subsection{Class comparison}
 To further analyze the performance of the models, we compare the per-class precision, recall, and F1 scores for the best performing model (ConvNeXt with flat multiclass strategy) across the command and non-command classes (Figure~\ref{fig:per_class_heatmap}). For all classes the best model managed to achieve a F1 score above $0.85$, with macro F1 $0.917$. The biggest problems were with ``no" and ``go". The results on the ``unknown" class were very good - almost the highest F1 score among all classes.
@@ -359,6 +375,8 @@ This report was edited with AI assistance, to improve clarity, consistency, and 
 \label{app:extra_analysis}
 
 Figures~\ref{fig:raw_wave_and_spectrogram_1}, \ref{fig:raw_wave_and_spectrogram_2}, and \ref{fig:raw_wave_and_spectrogram_3} provide additional waveform--spectrogram examples for the labels \textit{down}, \textit{no}, and \textit{up}, respectively. These supplementary plots complement the main text by illustrating cross-class variability in temporal envelope shape, onset location, and spectral energy concentration. Together, they support the motivation for using time-frequency features and for comparing architectures with different inductive biases for local versus global temporal-spectral structure.
+
+Figures~\ref{fig:regularization_sensitivity} and \ref{fig:strategy_radar} provide additional visualizations of the regularization sensitivity across different configurations and the score distribution across different strategies, respectively. Figure~\ref{fig:training_efficiency_scatter} shows the training efficiency for different strategies, which is an important factor to consider when selecting a model for deployment.
 
 \begin{figure}[htbp]
     \centering
