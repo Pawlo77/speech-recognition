@@ -26,7 +26,7 @@
 \maketitle
 
 \begin{abstract}
-Keyword spotting (KWS) is a core component of always-on speech interfaces, where both robustness and low-latency inference are required. This paper presents a controlled comparative study of KWS architectures on the Kaggle TensorFlow Speech Recognition Challenge corpus under a unified training and evaluation protocol. We formulate a fixed $12$-class task ($10$ commands plus \texttt{\_\_unknown\_\_} and \texttt{\_\_silence\_\_}) and investigate $3$ factors that govern performance: front-end representation, architectural inductive bias, and non-command modeling strategy. To isolate architectural effects, all systems are trained from random initialization with identical optimization controls, deterministic settings, and multi-seed evaluation. The experimental design follows a $4$-phase selection procedure: feature ablation, global optimization tuning, backbone comparison across model families, and targeted non-command methodology analysis. Final held-out testing is restricted to systems selected in the last phase, including both single-model and within-method ensemble variants. This manuscript reports methodology and evaluation criteria; quantitative outcomes are deferred to a full-results version.
+Keyword spotting (KWS) is a core component of always-on speech interfaces, where both robustness and low-latency inference are required. This paper presents a controlled comparative study of KWS architectures on the Kaggle TensorFlow Speech Recognition Challenge corpus under a unified training and evaluation protocol. We formulate a fixed $12$-class task ($10$ commands plus \texttt{\_\_unknown\_\_} and \texttt{\_\_silence\_\_}) and investigate $3$ factors that govern performance: front-end representation, architectural inductive bias, and non-command modeling strategy. To isolate architectural effects, all systems are trained from random initialization with identical optimization controls, deterministic settings, and multi-seed evaluation. The experimental design follows a $4$-phase selection procedure: feature ablation, global optimization tuning, backbone comparison across model families, and targeted non-command methodology analysis. Final held-out testing is restricted to systems selected in the last phase, including both single-model and within-method ensemble variants. We report the executed protocol and resulting comparative outcomes under this controlled setup.
 \end{abstract}
 
 \section{Introduction and Motivation}
@@ -51,7 +51,7 @@ Split construction follows three policies. First, command-only small splits are 
 
 Table~\ref{tab:dataset_splits_12class} reports exact split sizes after applying this $12$-class remapping to the repository split lists. We provide total sample count, active class count, command/non-command composition, and the intended usage of each split in the experimental pipeline.
 
-\begin{table*}[htbp]
+\begin{table*}[h]
 \centering
 \caption{Dataset split statistics under the $12$-class mapping ($10$ commands + unknown + silence).}
 \label{tab:dataset_splits_12class}
@@ -75,27 +75,27 @@ Each synthetic sample is formed by blending $2$ or $3$ one-second clips. Before 
 
 To avoid regenerating the same example, uniqueness is tracked at the source-file level (sorted source-path tuple), not at the class-combination level. After synthesis, each candidate is passed through an envelope-based smoothness gate (windowed RMS trajectory checks for abrupt jumps and deep internal valleys). Candidates that fail this gate are discarded and regenerated in a retry loop; only accepted candidates are written to the \texttt{\_\_unknown\_\_} directory. During extended-split construction, original unknown candidates are first deduplicated by audio-content hash; if this deduplicated pool is smaller than the required unknown quota, synthetic mixtures are added as a top-up until the target unknown count is reached (or generation attempts are exhausted).
 
-\begin{figure}[htbp]
+\begin{figure}[h]
     \centering
     \includegraphics[width=\linewidth]{../notebooks/plots/extended_split_class_histogram.png}
     \caption{Class distribution in the extended training set.}
     \label{fig:extended_split_class_histogram}
 \end{figure}
 
-\subsection{Audio analysis}
-In analyzing the raw audio data the focus is on understanding the raw waveforms and their spectral properties. Figure~\ref{fig:raw_wave_and_spectrogram} shows an example of a raw audio waveform and its corresponding spectrogram, illustrating the temporal and frequency characteristics of a typical command sample. The spectrogram reveals the energy distribution across frequencies over time, which is crucial for feature extraction strategies. Raw waveforms exhibit high variability in amplitude and temporal structure, while spectrograms provide a more stable representation that captures the essential characteristics of the audio signal. Observing raw waveforms of different classes (Appendix \ref{app:extra analysis}) reveals that amplitude patterns varies, however the main signal begins approximately after $0.4$ seconds.
+\subsection{Audio Analysis}
+In analyzing the raw audio data, we focus on understanding the raw waveforms and their spectral properties. Figure~\ref{fig:raw_wave_and_spectrogram} shows an example of a raw audio waveform and its corresponding spectrogram, illustrating the temporal and frequency characteristics of a typical command sample. The spectrogram reveals the energy distribution across frequencies over time, which is crucial for feature extraction strategies. Raw waveforms exhibit high variability in amplitude and temporal structure, while spectrograms provide a more stable representation that captures the essential characteristics of the audio signal. Observing raw waveforms of different classes (Appendix~\ref{app:extra_analysis}) reveals that amplitude patterns vary; however, the main signal typically begins around $0.4$ seconds.
 
-\begin{figure}[htbp]
+\begin{figure}[h]
     \centering
     \includegraphics[width=\linewidth]{../notebooks/plots/spectrogram_example_yes.png}
     \caption{Raw wave and spectrogram example from train set for "yes".}
     \label{fig:raw_wave_and_spectrogram}
 \end{figure}
 
-Another factor to consider is the average spectral content across different command classes. Figure~\ref{fig:mean_fft_per_label_train} shows the mean FFT magnitude for each label in the training set, highlighting differences in frequency content between commands. Observation can be made that different commands have their own characteristic which can be exploited by the models to distinguish between them.
+Another factor to consider is the average spectral content across different command classes. Figure~\ref{fig:mean_fft_per_label_train} shows the mean FFT magnitude for each label in the training set, highlighting differences in frequency content between commands. This suggests that commands have characteristic spectral profiles that models can exploit for discrimination.
 
 
-\begin{figure*}[htbp]
+\begin{figure*}[h]
     \centering
     \includegraphics[width=0.7\textwidth]{../notebooks/plots/mean_fft_per_label_train.png}
     \caption{Mean FFT magnitude per label in the training set.}
@@ -126,12 +126,17 @@ Split usage is fixed by the dataset protocol in Section~\ref{sec:dataset}: Phase
 \subsection{Uniform Training Protocol}
 To ensure fair architectural comparison, all models are trained under an identical, deterministic protocol with shared hyperparameters and optimization controls. Model training follows AdamW (\cite{loshchilov2019adamw}) with fixed base settings ($\beta_1 = 0.9, \beta_2 = 0.999, \epsilon = 10^{-8}$) and a base learning rate of $3 \times 10^{-4}$. Phase $2$ searches the AdamW regularization and scheduler settings, and the winning optimizer configuration is then carried forward into Phases $3$ and $4$. Gradient clipping is applied with a maximum norm threshold of $1.0$ to stabilize training on recurrent and attention-based architectures.
 
-The training regimen uses a batch size of $32$ across all experiments and model families, with $60$ training epochs and a learning-rate scheduler employing cosine annealing with linear warmup (\texttt{cosine\_annealing\_warmup}). A warmup of $5$ epochs linearly increases the learning rate from a near-zero start factor of $10^{-3}$, followed by cosine decay to a minimum rate of $10^{-6}$. Early stopping is enforced with a patience of $10$ epochs without macro-F1 improvement on the validation set. Deterministic execution is enabled via fixed seed initialization, and validation is performed every epoch to track model convergence.
+The training regimen uses a batch size of $32$ (a constraint forced by hardware limitations) across all experiments and model families, with unlimited training epochs and a learning-rate scheduler employing cosine annealing with linear warmup (\texttt{cosine\_annealing\_warmup}). A warmup of $5$ epochs linearly increases the learning rate from a near-zero start factor of $10^{-3}$, followed by cosine decay to a minimum rate of $10^{-6}$. Early stopping is enforced with a patience of $10$ epochs without macro-F1 improvement on the validation set. Deterministic execution is enabled via fixed seed initialization, and validation is performed every epoch to track model convergence.
 
 \subsection{Phase 1: Feature Extraction Strategy (Q1)}
 Raw audio waveforms are highly inefficient for direct neural network processing due to a lack of semantic meaning at the sample level and high adjacent correlation \cite{purwins2019deep}. We transform the signal into time-frequency representations using the Short-Time Fourier Transform (STFT) \cite{allen1977short}.
 
-% TODO: Insert visualization of the audio feature extraction pipeline (Waveform -> STFT windowing -> Mel Filterbank -> Log/PCEN Compression).
+\begin{figure*}[h]
+    \centering
+    \includegraphics[width=\textwidth]{../notebooks/plots/audio_feature_extraction_pipeline.png}
+    \caption{Audio feature extraction pipeline from waveform loading through STFT windowing, mel filterbank projection, and log/PCEN compression.}
+    \label{fig:audio_feature_extraction_pipeline}
+\end{figure*}
 
 Feature extraction is governed by the time-frequency uncertainty principle (Gabor limit), which bounds resolution such that $\Delta t \cdot \Delta f \geq \frac{1}{4\pi}$. We encapsulate all preprocessing pipelines within PyTorch \texttt{nn.Module}s to ensure differentiable, GPU-accelerated computation, evaluating five distinct strategies:
 
@@ -143,9 +148,9 @@ Feature extraction is governed by the time-frequency uncertainty principle (Gabo
     \item[Mel + SpecAugment:] Acting as structured input dropout, SpecAugment \cite{park2019specaugment} applies stochastic rectangular masks across time and frequency axes, forcing the model to learn distributed phonetic representations.
 \end{description}
 
-To prevent favoring a specific architecture during this phase, we evaluate the pipelines on two proxy baselines: a spatial ConvNeXt model and a sequential xLSTM model. ConvNeXt is implemented with a 1-channel input stem and shared adapter-level shape normalization, which keeps all listed feature variants (including $40\times101$ MFCC) executable in the current stack. This ensures we do not inadvertently handicap sequential models that might uniquely benefit from high-temporal strides. Table~\ref{tab:feature_strategies} and Figure~\ref{fig:example_features} detail these setups.
+\noindent To prevent favoring a specific architecture during this phase, we evaluate the pipelines on two proxy baselines: a spatial ConvNeXt model and a sequential xLSTM model. ConvNeXt is implemented with a 1-channel input stem and shared adapter-level shape normalization, which keeps all listed feature variants (including $40\times101$ MFCC) executable in the current stack. This ensures we do not inadvertently handicap sequential models that might uniquely benefit from high-temporal strides. Table~\ref{tab:feature_strategies} and Figure~\ref{fig:audio_feature_extraction_pipeline} detail these setups.
 
-\begin{table*}[htbp]
+\begin{table*}[h]
 \centering
 \caption{Feature extraction strategies compared in Phase $1$.}
 \label{tab:feature_strategies}
@@ -170,21 +175,31 @@ To isolate structural effects, we train all models entirely from random initiali
 
 Phase $2$ tunes the global AdamW configuration (Table~\ref{tab:global_hyperparams}) on the best Phase $1$ feature set. Phase $3$ then sweeps model-specific hyperparameters (Table~\ref{tab:model_hyperparams}) using the winning Phase $2$ optimizer settings across the executed families. The original plan also included xLSTM as a high-capacity recurrent comparator, but it was excluded from Phase $3$ execution after Phases $1$ and $2$: relative to ConvNeXt, xLSTM showed weaker proxy-stage behavior while requiring more than $10\times$ longer training time. SSAMBA was likewise excluded from executed Phase $3$ runs after an initial round on the target hardware: the available macOS Mamba backend lacks a fused parallel scan, and observed wall-clock cost exceeded $3$ hours per epoch, which was incompatible with the multi-trial, multi-seed Phase $3$ budget.
 
-% TODO: Add visual comparison of the structural paradigms: Local spatial (ConvNeXt) vs. Global attention (AST) vs. Sequential state tracking (SSAMBA/xLSTM).
-
 \begin{description}
-    \item[AST (Audio Spectrogram Transformer):] Implemented with Hugging Face \texttt{ASTForAudioClassification} (from \texttt{transformers}) using \texttt{ASTConfig} with hidden size $512$, $8$ encoder layers, $8$ attention heads, and intermediate size $2048$ (targeted \textasciitilde{}25M-scale setup in this work). \textit{Key feature / why chosen:} global self-attention from the first layer gives immediate all-to-all context, making AST the explicit ``global dependency'' reference model \cite{vaswani2017attention, gong2021ast}.
-    \item[ConvNeXt (Modern CNN):] Implemented as \texttt{torchvision.models.convnext\_tiny} (primary backend), with the first stem convolution adapted to one-channel spectrogram input; \texttt{timm convnext\_tiny} is kept as backend fallback. \textit{Key feature / why chosen:} strong locality and translation-equivariant inductive bias provide the canonical modern CNN baseline against which global and recurrent models are compared \cite{lecun1995convolutional, liu2022convnet}.
-    \item[SSAMBA (Selective State Space; planned, excluded):] Implemented through \texttt{mamba\_ssm.Mamba} blocks in a repository wrapper (\texttt{MambaHead}), stacked with configuration $d_{\text{model}}=768$, $d_{\text{state}}=64$, $d_{\text{conv}}=4$, expand $=2$, and $6$ layers (targeted \textasciitilde{}25M-scale setup in this work). \textit{Key feature / why chosen:} input-selective state-space updates target long-range sequence modeling with linear-time scaling, representing an efficient alternative to full attention \cite{gu2023mamba,shams2024ssamba}.
+    \item[AST (Audio Spectrogram Transformer):] Implemented with Hugging Face \texttt{ASTForAudioClassification} (from \texttt{transformers}) using \texttt{ASTConfig} with hidden size $512$, $8$ encoder layers, $8$ attention heads, and intermediate size $2048$ (targeted $\sim$25M-scale setup in this work).
 
-    \textit{This branch was excluded from Phase $3$ execution because was taking over a $3$ hours per training epoch.}
-    \item[xLSTM (High-Capacity Recurrence; planned, not executed):] Implemented with \texttt{xlstm.xLSTMBlockStack} in a repository wrapper (\texttt{XLSTMHead}), using embedding dimension $704$/$768$ and $8$ blocks (alternating mLSTM/sLSTM placements; targeted \textasciitilde{}25M-scale setup). \textit{Key feature / why chosen:} matrix-memory recurrence $C_t \in \mathbb{R}^{d \times d}$ increases recurrent capacity beyond standard LSTM cells, serving as the originally planned high-capacity recurrent comparator \cite{beck2024xlstm}.
+    \textit{Key feature / why chosen:} global self-attention from the first layer gives immediate all-to-all context, making AST the explicit ``global dependency'' reference model \cite{vaswani2017attention, gong2021ast}.
+
+    \item[ConvNeXt (Modern CNN):] Implemented as \texttt{torchvision.models.convnext\_tiny} (primary backend), with the first stem convolution adapted to one-channel spectrogram input; \texttt{timm convnext\_tiny} is kept as backend fallback.
+
+    \textit{Key feature / why chosen:} strong locality and translation-equivariant inductive bias provide the canonical modern CNN baseline against which global and recurrent models are compared \cite{lecun1995convolutional, liu2022convnet}.
+
+    \item[SSAMBA (Selective State Space; planned, excluded):] Implemented through \texttt{mamba\_ssm.Mamba} blocks in a repository wrapper (\texttt{MambaHead}), stacked with configuration $d_{\text{model}}=768$, $d_{\text{state}}=64$, $d_{\text{conv}}=4$, expand $=2$, and $6$ layers (targeted $\sim$25M-scale setup in this work). \textit{Key feature / why chosen:} input-selective state-space updates target long-range sequence modeling with linear-time scaling, representing an efficient alternative to full attention \cite{gu2023mamba,shams2024ssamba}.
+
+    \textit{This branch was excluded from Phase $3$ execution because it required more than $3$ hours per training epoch.}
+
+    \item[xLSTM (High-Capacity Recurrence; planned, not executed):] Implemented with \texttt{xlstm.xLSTMBlockStack} in a repository wrapper (\texttt{XLSTMHead}), using embedding dimension $704$/$768$ and $8$ blocks (alternating mLSTM/sLSTM placements; targeted $\sim$25M-scale setup).
+
+    \textit{Key feature / why chosen:} matrix-memory recurrence $C_t \in \mathbb{R}^{d \times d}$ increases recurrent capacity beyond standard LSTM cells, serving as the originally planned high-capacity recurrent comparator \cite{beck2024xlstm}.
 
     \textit{This branch was excluded from Phase $3$ execution because its Phase $1$--$2$ proxy behavior was worse than ConvNeXt while its training time was more than $10\times$ longer.}
-    \item[MLP-Mixer:] Implemented as \texttt{timm gmixer\_24\_224} (official gMLP/Mixer-family model) for the MLP-only baseline. \textit{Key feature / why chosen:} token/channel mixing via dense projections with no explicit convolutional or recurrent prior acts as an architectural ``minimal prior'' control \cite{tolstikhin2021mlpmixer}.
+
+    \item[MLP-Mixer:] Implemented as \texttt{timm gmixer\_24\_224} (official gMLP/Mixer-family model) for the MLP-only baseline.
+
+    \textit{Key feature / why chosen:} token/channel mixing via dense projections with no explicit convolutional or recurrent prior acts as an architectural ``minimal prior'' control \cite{tolstikhin2021mlpmixer}.
 \end{description}
 
-\begin{table}[htbp]
+\begin{table}[h]
 \centering
 \caption{Global optimization hyperparameters (Phase $2$).}
 \label{tab:global_hyperparams}
@@ -201,7 +216,7 @@ LR scheduler & Cosine Annealing with Warmup / Reduce LR on Plateau & Swept sched
 \end{tabularx}
 \end{table}
 
-\begin{table*}[htbp]
+\begin{table*}[h]
 \centering
 \caption{Model-specific hyperparameter sweeps (Phase $3$), including architecture type and parameter count from the repo-specific adapters used in this work (default non-pretrained configuration, $12$ output classes). SSAMBA and xLSTM are retained as planned scope but excluded from executed runs.}
 \label{tab:model_hyperparams}
@@ -217,7 +232,7 @@ LR scheduler & Cosine Annealing with Warmup / Reduce LR on Plateau & Swept sched
 \end{tabular}
 \end{table*}
 
-The counts in Table~\ref{tab:model_hyperparams} are measured on the repository's adapterized backbones, not on the upstream libraries' unmodified reference models. This keeps the comparison honest about the actual code we run while still keeping the backbones in a comparable parameter band; the point is adapter-level parity, not matching an external giant-model budget.
+\noindent The counts in Table~\ref{tab:model_hyperparams} are measured on the repository's adapterized backbones, not on the upstream libraries' unmodified reference models. This keeps the comparison honest about the actual code we run while still keeping the backbones in a comparable parameter band; the point is adapter-level parity, not matching an external giant-model budget.
 
 \subsection{Phase 4: Non-Command Class Methodology (Q3)}
 All core models are optimized natively via standard \texttt{CrossEntropyLoss} \cite{goodfellow2016deep}. We intentionally defer imbalance-specific loss shaping and resampling in earlier phases to keep architectural comparisons interpretable. Phases $1$--$3$ use command-only data splits while preserving a shared implementation template for model heads. Phase $4$ keeps the selected backbone family and hyperparameters fixed and retrains on \texttt{train\_extended} for explicit non-command handling. In this sense, ``freezing the top $3$ architectures'' refers to freezing architecture and optimization choices selected upstream. In Phase $4$, we test $5$ alternatives for handling \texttt{\_\_unknown\_\_} and \texttt{\_\_silence\_\_}:
@@ -249,7 +264,30 @@ The original experimental plan defined a four-phase funnel: feature strategy sel
 
 To account for hardware-level non-determinism during GPU acceleration, we execute every experiment three separate times using fixed starting points (seeds $0$, $42$, and $2003$) and report aggregated results (mean $\pm$ standard deviation).
 
-All experiments are run on a single Apple MacBook Pro with an M4 Pro chip, $48$ GB unified memory, and a $1024$ GB SSD. This hardware budget motivates the use of \texttt{train\_small} and \texttt{valid\_small} in Phases $1$--$3$.
+All experiments are run on a single Apple MacBook Pro with an M4 Pro chip, $48$ GB unified memory, and a $1024$ GB SSD. This hardware budget motivates the use of \texttt{train\_small} and \texttt{valid\_small} in Phases $1$--$3$. Figure~\ref{fig:mlflow_phase_wall_time_summary} summarizes the wall-time breakdown and run counts per phase; the total compute time accumulated to around $320$ GPU-hours across all phases. Table~\ref{tab:mlflow_model_speed_summary} breaks the same tracking data down by model architecture and reports the average step speed observed for each family.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{mlflow_phase_wall_time_summary.png}
+    \caption{Total wall time and run count by phase, measured from the MLflow tracking database.}
+    \label{fig:mlflow_phase_wall_time_summary}
+\end{figure}
+
+\begin{table*}[h]
+\centering
+\caption{Average model step speed by architecture. Transformer- and CNN-based models show superior step speed compared to recurrent and MLP-only models.}
+\label{tab:mlflow_model_speed_summary}
+\small
+\begin{tabularx}{0.8\textwidth}{@{}l r r r r r@{}}
+\toprule
+\textbf{Architecture} & \textbf{Runs} & \textbf{Mean step time (ms)} & \textbf{Median step time (ms)} & \textbf{Mean steps/s} & \textbf{Total steps} \\ \midrule
+AST & $36$ & $6.26$ & $4.86$ & $210.17$ & $823{,}484$ \\
+ConvNeXt & $45$ & $5.55$ & $3.68$ & $262.67$ & $1{,}011{,}138$ \\
+MLP-Mixer & $24$ & $26.84$ & $27.06$ & $49.74$ & $300{,}696$ \\
+SSAMBA & $1$ & $13{,}199.47$ & $13{,}199.47$ & $0.08$ & $700$ \\
+xLSTM & $27$ & $56.62$ & $49.75$ & $20.94$ & $333{,}971$ \\ \bottomrule
+\end{tabularx}
+\end{table*}
 
 To stabilize compute and comparisons in Phases $1$--$3$, the small splits are fixed to exactly $1{,}000$/$250$/$250$ samples per command class for train/validation/test, respectively.
 
@@ -260,62 +298,64 @@ Final test reporting covers all completed Phase $4$ trials, since this stage det
 
 Beyond single-model results, we evaluate all ensemble combinations across the $3$ Phase $3$-derived backbones within each fixed Phase $4$ method. Denoting model outputs by $M_1, M_2, M_3$, we test all non-empty subsets (i.e., $2^3 - 1 = 7$ combinations) and aggregate class probabilities by simple averaging under a common within-method calibration rule. Cross-method ensembles are not considered; each ensemble is built from models produced by a single Phase $4$ strategy. These ensemble checks are inference-only and therefore excluded from the cumulative training execution counts in Table~\ref{tab:model_calls}.
 
+All results are available \href{https://drive.google.com/drive/folders/1-1eHoHBH44WIyfvjSrMm4dskzo3MDMuM}{on Google Drive}.
+
 \subsection{Phase 1}
 \label{sec:phase1}
-Phase 1 of the experiment focuses on evaluating different feature extraction strategies. Results are reported in terms of macro-F1 scores for each strategy across the two models (ConvNeXt and xLSTM). The results are showed in a heatmap (Figure~\ref{fig:extr_strategy_heatmap}). The heatmap shows mel-spectrograms and mfcc performances are a lot better than the other feature extraction methods, however satisfactory performance is observed only on the ConvNeXt model. xLSTM shows a significant performance drop across all feature extraction strategies, which is the reason to exclude it later phases, as it is not competitive and it is computationally expensive, as mentioned earlier.
+Phase $1$ focuses on evaluating different feature extraction strategies. Results are reported in terms of macro-F1 for each strategy across the two proxy models (ConvNeXt and xLSTM), and are visualized in Figure~\ref{fig:extr_strategy_heatmap}. Mel-spectrogram and MFCC variants outperform the other feature extraction methods, although satisfactory performance is observed only on ConvNeXt. xLSTM shows a significant performance drop across all feature extraction strategies, which motivates its exclusion from later phases due to both lower competitiveness and higher computational cost.
 
 \subsection{Phase 2}
 \label{sec:phase2}
 
-\begin{figure}
+\begin{figure}[h]
     \centering
     \includegraphics[width=\linewidth]{phase_1_heatmap.png}
     \caption{Phase 1 results: macro-F1 scores for each feature extraction strategy across the two models.}
     \label{fig:extr_strategy_heatmap}
 \end{figure}
 
-The main focus in this section is on the results of the global hyperparameter tuning. The best performing optimizer configuration is selected based on the best macro f1 scores and convergence speed. The results are visualized in a bar chart (Figure~\ref{fig:convergence_speed}), which shows the convergence speed of different optimizer configurations. The results in terms of convergence speed are similar across all configurations, with reduce on plateau showing a slightly faster convergence compared to cosine annealing with warmup. However, the differences are not significant enough to make a clear choice between the two. The weight decay of $10^{-2}$ showed a slightly better performance compared to $10^{-1}$, however again the differences are not significant. Weigth decay $10^{-1}$ showed higher standard deviation on ConvNeXt, which is a sign of instability.
+The main focus in this section is global hyperparameter tuning. The best-performing optimizer configuration is selected based on macro-F1 and convergence speed. Figure~\ref{fig:convergence_speed} compares convergence speed across optimizer configurations. Convergence differences are small, with Reduce LR on Plateau converging slightly faster than cosine annealing with warmup, but not enough to establish a decisive winner on speed alone. Weight decay $10^{-2}$ provides slightly better mean macro-F1 than $10^{-1}$, and $10^{-1}$ shows higher standard deviation on ConvNeXt, indicating reduced stability.
 
-\begin{figure}[H]
+\begin{figure}[h]
     \centering
     \includegraphics[width=\linewidth]{phase_2_convergence_speed.png}
     \caption{Phase 2 results: convergence speed of different optimizer configurations.}
     \label{fig:convergence_speed}
 \end{figure}
 
-The results from xLSTM model weren't taken as seriously as the performance was significantly worse than ConvNeXt, and all of the combinations showed similar performance. Overall F1 scores were similar for all combinations (Figure~\ref{fig:regularization_sensitivity}).
+The xLSTM results are interpreted as secondary evidence because performance is substantially worse than ConvNeXt, and all tested combinations are closely clustered. Overall F1 is similar across xLSTM regularization settings (Figure~\ref{fig:regularization_sensitivity}).
 
 \subsection{Phase 3}
 \label{sec:phase3}
 
-\begin{figure}
+\begin{figure}[h]
     \centering
     \includegraphics[width=\linewidth]{phase_3_architecture_distribution.png}
     \caption{Phase 3 results: architecture distribution of the best performing models.}
     \label{fig:architecture_distribution}
 \end{figure}
 
-With selected best training setup in phase 1 and phase 2, we proceed to evaluate the models in phase 3. 3 models were evaluated: AST, ConvNeXt and MLP-Mixer. The results are reported in terms of macro-F1 scores for each model across the different hyperparameter configurations (Figure~\ref{fig:architecture_distribution}). Surprisingly, the ConvNeXt model showed the best performance across all configurations and the most stable. AST showed that for some configurations it can achieve a similar performance to ConvNeXt, however the performance was more unstable with a higher standard deviation. MLP-Mixer showed the worst performance across all configurations, with a significant drop in the macro-F1 scores compared to the other two models, despite two similar score it proved to be useless for this task. The failure cases for the best performing models are highlighted in Figure~\ref{fig:failure_highlight}, which shows how often different models were worse than random guessing on specific classes. ConvNeXt showed zero cases, AST only 2, and MLP-Mixer more than $50\%$.
+With the best training setup selected in Phases $1$ and $2$, we evaluate three models in Phase $3$: AST, ConvNeXt, and MLP-Mixer. Results are reported as macro-F1 across the tested hyperparameter configurations (Figure~\ref{fig:architecture_distribution}). ConvNeXt shows the strongest and most stable performance. AST reaches comparable performance in selected configurations but with higher variance. MLP-Mixer performs worst across configurations, with a substantial macro-F1 drop relative to AST and ConvNeXt. Failure highlights in Figure~\ref{fig:failure_highlight} show how often models fall below random guessing on specific classes: ConvNeXt has zero such cases, AST has two, and MLP-Mixer exceeds $50\%$.
 
-\begin{figure}
+\begin{figure}[h]
     \centering
     \includegraphics[width=\linewidth]{phase_3_failure_highlight.png}
     \caption{Phase 3 results: failure cases highlighted for the best performing models.}
     \label{fig:failure_highlight}
 \end{figure}
 
-In terms of efficiency between ConvNeXt and AST, ConvNeXt's total training times was singnificantly lower than AST, which paired with its better performance makes it the best choice for this task (Figure~\ref{fig:training_efficiency_scatter}). Analysing the training loss vs epoch for different models (Figure~\ref{fig:training_loss_vs_epoch}), we can see that ConvNeXt showed a more stable and consistent decrease in the training loss compared to AST and MLP-Mixer, which showed more fluctuations and higher final losses.
+In terms of efficiency between ConvNeXt and AST, ConvNeXt's total training time is significantly lower than AST's, which, paired with its better performance, makes it the strongest choice for this task (Figure~\ref{fig:training_efficiency_scatter}). Analyzing training loss versus epoch (Figure~\ref{fig:training_loss_vs_epoch}) shows that ConvNeXt exhibits a more stable and consistent loss decrease than AST and MLP-Mixer, which show larger fluctuations and higher final losses.
 
-\begin{figure}
+\begin{figure}[h]
     \centering
     \includegraphics[width=\linewidth]{phase_3_training_loss_vs_epoch.png}
     \caption{Phase 3 results: Training loss vs. epoch for different model families.}
     \label{fig:training_loss_vs_epoch}
 \end{figure}
 
-Hyperparameter sensitivity analysis for AST (Figure~\ref{fig:ast_ablation}) shows consistent mean performance for linear head for both dropout values and positional embedding strategies. For MLP-Mixer, dropout $0.5$ showed a significant drop in the performance compared to dropout $0.1$, which is might be a sign of instability for this model.
+Hyperparameter sensitivity analysis for AST (Figure~\ref{fig:ast_ablation}) shows consistent mean performance for the linear head across both dropout values and positional embedding strategies. For MLP-Mixer, dropout $0.5$ leads to a significant performance drop compared to dropout $0.1$, which may indicate instability in this model family.
 
-\begin{figure}
+\begin{figure}[h]
     \centering
     \includegraphics[width=\linewidth]{phase_3_ast_ablation.png}
     \caption{Phase 3 results: Ablation study for AST.}
@@ -325,26 +365,26 @@ Hyperparameter sensitivity analysis for AST (Figure~\ref{fig:ast_ablation}) show
 
 \subsection{Phase 4}
 \label{sec:phase4}
-Phase 4 focuses on evaluating different strategies for handling non-command classes (unknown and background). Beside of the macro-F1 scores for the non-command classes, we also evaluate the false trigger rate for the silence class and the unknown-to-command leakage, which measures how often unknown samples are misclassified as one of the command classes. The best performing is \textit{flat multiclass} approach, with \textit{loss reweighting} showing a similar performance (Figure~\ref{fig:pareto_front}). \textit{Sampling control} on ConvNeXt also achieved good results, however dropped completly on AST. The worst performing strategy by far was the \textit{two-stage detector}, which showed a significant drop in the command macro-F1 scores, and a very high false trigger rate for the silence class. Similar conclusions can be drawn from Figure~\ref{fig:silence_false_trigger_rate}, which shows the false trigger rate for the silence class across different strategies. The two-stage detector approach showed a significantly higher false trigger rate compared to the other strategies, which is a critical failure mode for KWS systems. The flat multiclass and sampling control approaches showed the lowest false trigger rates, indicating better robustness against misclassifying silence as a command. MLP-Mixer again proved to be a poor choice for this task. Additional comparison of the scores and silence and unknown false trigger rates across different strategies is shown in Figure~\ref{fig:strategy_radar}.
+Phase $4$ focuses on evaluating strategies for handling non-command classes (\texttt{\_\_unknown\_\_} and \texttt{\_\_silence\_\_}). Besides macro-F1 on the non-command classes, we evaluate silence false-trigger rate and unknown-to-command leakage (how often unknown samples are misclassified as command labels). The best-performing approach is \textit{flat multiclass}, with \textit{loss reweighting} showing similar performance (Figure~\ref{fig:pareto_front}). \textit{Sampling control} on ConvNeXt also achieves good results, but drops substantially on AST. The worst-performing strategy is \textit{two-stage detector}, which shows a clear command macro-F1 drop and a very high silence false-trigger rate. Figure~\ref{fig:silence_false_trigger_rate} confirms this failure mode, while flat multiclass and sampling control maintain lower false-trigger rates and better robustness against silence-to-command errors. MLP-Mixer again proves to be a weak choice for this task. Additional score and false-trigger comparisons are shown in Figure~\ref{fig:strategy_radar}.
 
-\begin{figure}
+\begin{figure}[h]
     \centering
     \includegraphics[width=\linewidth]{phase_4_pareto_scatter.png}
     \caption{Phase 4 results: Command scores vs. Non-command scores for different strategies.}
     \label{fig:pareto_front}
 \end{figure}
 
-\begin{figure}
+\begin{figure}[h]
     \centering
     \includegraphics[width=\linewidth]{phase_4_silence_false_trigger_rate.png}
     \caption{Phase 4 results: Silence false trigger rates for different strategies.}
     \label{fig:silence_false_trigger_rate}
 \end{figure}
 
-\subsection{Class comparison}
-To further analyze the performance of the models, we compare the per-class precision, recall, and F1 scores for the best performing model (ConvNeXt with flat multiclass strategy) across the command and non-command classes (Figure~\ref{fig:per_class_heatmap}). For all classes the best model managed to achieve a F1 score above $0.85$, with macro F1 $0.917$. The biggest problems were with ``no" and ``go". The results on the ``unknown" class were very good - almost the highest F1 score among all classes.
+\subsection{Class Comparison}
+To further analyze model behavior, we compare per-class precision, recall, and F1 for the best-performing model (ConvNeXt with flat multiclass strategy) across command and non-command classes (Figure~\ref{fig:per_class_heatmap}). The best model achieves F1 above $0.85$ for all classes, with macro-F1 of $0.917$. The most difficult labels are ``no'' and ``go''. The ``unknown'' class performs strongly, with one of the highest F1 scores among all classes.
 
-\begin{figure}
+\begin{figure}[h]
     \centering
     \includegraphics[width=\linewidth]{per_class_heatmap.png}
     \caption{Phase 4 results: Per-class performance for the best performing model.}
@@ -352,16 +392,15 @@ To further analyze the performance of the models, we compare the per-class preci
 \end{figure}
 
 \section{Conclusion}
-This study delivers a complete, reproducible $4$-phase benchmark for keyword spotting under a fixed $12$-class formulation ($10$ commands + \texttt{\_\_unknown\_\_} + \texttt{\_\_silence\_\_}). Across the full pipeline, ConvNeXt emerged as the strongest and most stable architecture, with AST as a competitive but less stable alternative and MLP-Mixer consistently underperforming. In feature selection, mel-based front-ends (including MFCC as a strong compact variant) clearly outperformed the remaining candidates. In global optimization tuning, cosine annealing with warmup and stronger weight decay provided the best convergence-quality trade-off for the winning branch.
+This study delivers a complete, reproducible $4$-phase benchmark for keyword spotting under a fixed $12$-class formulation ($10$ commands + \texttt{\_\_unknown\_\_} + \texttt{\_\_silence\_\_}). Across the full pipeline, ConvNeXt emerged as the strongest and most stable architecture, with AST as a competitive but less stable alternative and MLP-Mixer consistently underperforming. In feature selection, mel-based front-ends (including MFCC as a strong compact variant) clearly outperformed the remaining candidates. In global optimization tuning, cosine annealing with warmup combined with weight decay $10^{-2}$ provided the best convergence-quality trade-off for the winning branch.
 
 For non-command handling, the flat multiclass strategy provided the best overall deployment profile, while loss reweighting remained a close alternative. In contrast, the two-stage detector showed a clear failure mode through elevated silence false-trigger behavior, making it unsuitable under the strict command-preservation gate used in this work. Per-class diagnostics further showed that command pairs with higher phonetic similarity (notably ``go/no'' and ``on/off'') remain the main source of residual error, even in the best model.
 
 Methodologically, the main contribution is not only the final ranking but the controlled decision funnel itself: each phase narrows the search space while preserving comparability through fixed seeds, shared optimization controls, and explicit non-command risk metrics (unknown leakage and silence false triggers). Although xLSTM and SSAMBA remain implemented as planned branches, their exclusion from executed Phase $3$ runs is justified by the measured compute-performance trade-off on the target hardware. Overall, the presented protocol and results provide a practical template for building robust KWS systems under realistic resource constraints.
 
-The results indicate that the ConvNeXt model is the best performing model for this task, with the flat multiclass strategy providing the best overall deployment profile. The two-stage detector showed a clear failure mode through elevated silence false-trigger behavior, making it unsuitable under the strict command-preservation gate used in this work. Per-class diagnostics further showed that command pairs with higher phonetic similarity (notably ``go/no'') remain the main source of residual error, even in the best model.
-
 \section{Future Work}
 While this study establishes a strictly controlled baseline for evaluating KWS architectures, several avenues remain for future exploration. First, because our methodology isolates architectural inductive biases by training entirely from random initialization, future work could compare these baselines against pre-trained variants to quantify the performance gains afforded by transfer learning. Second, although our data preprocessing enforces a uniform one-second temporal support, adapting the top-performing architectures to process variable-length inputs or continuous, untrimmed audio streams would better simulate true always-on deployment conditions. Third, while the synthesis of the \texttt{\_\_unknown\_\_} class is currently limited to fixed extended splits, deploying our proposed synthesis pipeline as a dynamic, on-the-fly augmentation mechanism could further harden models against out-of-vocabulary spoken utterances. Finally, our current ensemble evaluation is restricted to within-method combinations; future research could explore cross-method ensembles to determine if heterogeneous non-command handling strategies yield superior robustness against false triggers.
+Due to time constraints under the available hardware budget, we did not deliver a full cross-method ensemble study in the final reporting cycle; this remains an explicit follow-up item.
 
 \section{AI Disclosure}
 This report was edited with AI assistance, to improve clarity, consistency, and formatting. Part of the docstrings, some phrasing and code refactoring or debugging were refined using AI tools, but all scientific decisions and interpretations are the authors' own. The core content, experimental design, and analysis were developed by the authors.
@@ -378,42 +417,42 @@ Figures~\ref{fig:raw_wave_and_spectrogram_1}, \ref{fig:raw_wave_and_spectrogram_
 
 Figures~\ref{fig:regularization_sensitivity} and \ref{fig:strategy_radar} provide additional visualizations of the regularization sensitivity across different configurations and the score distribution across different strategies, respectively. Figure~\ref{fig:training_efficiency_scatter} shows the training efficiency for different strategies, which is an important factor to consider when selecting a model for deployment.
 
-\begin{figure}[htbp]
+\begin{figure}[h]
     \centering
     \includegraphics[width=\linewidth]{../notebooks/plots/spectrogram_example_down.png}
     \caption{Raw wave and spectrogram example from train set for "down".}
     \label{fig:raw_wave_and_spectrogram_1}
 \end{figure}
 
-\begin{figure}[htbp]
+\begin{figure}[h]
     \centering
     \includegraphics[width=\linewidth]{../notebooks/plots/spectrogram_example_no.png}
     \caption{Raw wave and spectrogram example from train set for "no".}
     \label{fig:raw_wave_and_spectrogram_2}
 \end{figure}
 
-\begin{figure}[htbp]
+\begin{figure}[h]
     \centering
     \includegraphics[width=\linewidth]{../notebooks/plots/spectrogram_example_up.png}
     \caption{Raw wave and spectrogram example from train set for "up".}
     \label{fig:raw_wave_and_spectrogram_3}
 \end{figure}
 
-\begin{figure}[htbp]
+\begin{figure}[h]
     \centering
     \includegraphics[width=\linewidth]{phase_2_regularization_sensitivity.png}
     \caption{Regularization sensitivity across different configurations.}
     \label{fig:regularization_sensitivity}
 \end{figure}
 
-\begin{figure}[htbp]
+\begin{figure}[h]
     \centering
     \includegraphics[width=\linewidth]{phase_4_strategy_radar.png}
     \caption{Score distribution across different strategies.}
     \label{fig:strategy_radar}
 \end{figure}
 
-\begin{figure}[htbp]
+\begin{figure}[h]
     \centering
     \includegraphics[width=\linewidth]{training_efficiency_scatter.png}
     \caption{Training efficiency for different strategies.}
