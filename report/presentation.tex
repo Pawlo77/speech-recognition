@@ -99,19 +99,19 @@
     \end{itemize}
 \end{frame}
 
-\begin{frame}{Stage-Wise Architectures and Approaches}
+\begin{frame}{Phase-Wise Architectures and Approaches}
     \small
     \begin{itemize}
-        \item \textbf{Stage 1 (Feature selection):} comparison on \textbf{ConvNeXt + xLSTM} across mel/mfcc/pcen/specaugment pipelines.
-        \item \textbf{Stage 2 (Global tuning):} same proxy families with \textbf{scheduler + weight decay} sweep (cosine warmup vs reduce-on-plateau).
-        \item \textbf{Stage 3 (Architecture comparison):} full comparison of \textbf{ConvNeXt, AST, MLP-Mixer} (SSAMBA/xLSTM kept as planned, not executed).
-        \item \textbf{Stage 4 (Open-set handling):} top backbones retrained with \textbf{flat multiclass, sampling control, loss reweighting, two-stage}.
+        \item \textbf{Phase 1 (Feature selection):} comparison on \textbf{ConvNeXt + xLSTM} across mel/mfcc/pcen/specaugment pipelines.
+        \item \textbf{Phase 2 (Global tuning):} same proxy families with \textbf{scheduler + weight decay} sweep (cosine warmup vs reduce-on-plateau).
+        \item \textbf{Phase 3 (Architecture comparison):} full comparison of \textbf{ConvNeXt, AST, MLP-Mixer} (SSAMBA/xLSTM kept as planned, not executed).
+        \item \textbf{Phase 4 (Open-set handling):} top backbones retrained with \textbf{flat multiclass, sampling control, loss reweighting, two-stage}.
     \end{itemize}
 \end{frame}
 
 \begin{frame}{Models and Methods}
     \small
-    \textbf{Feature strategies (Stage 1)}
+    \textbf{Feature strategies (Phase 1)}
     \begin{itemize}
         \item \textbf{Mel-spectrogram:} log-mel time-frequency baseline representation.
         \item \textbf{High-temporal mel:} shorter window/hop for denser time sampling.
@@ -130,10 +130,10 @@
         \item \textbf{MLP-Mixer:} MLP-only token/channel mixing without convolution or attention blocks.
     \end{itemize}
     \vspace{0.2em}
-    \textbf{Planned but unused in executed Stage 3}
+    \textbf{Planned but unused in executed Phase 3}
     \begin{itemize}
-        \item \textbf{xLSTM}: recurrent sequence model, used in early stages and kept in repository scope, dropped due to poor performance.
-        \item \textbf{SSAMBA/Mamba}: selective state-space sequence model, implemented but not part of executed Stage 3 runs due to computational constraints.
+        \item \textbf{xLSTM}: recurrent sequence model, used in early phases and kept in repository scope, dropped due to poor performance.
+        \item \textbf{SSAMBA/Mamba}: selective state-space sequence model, implemented but not part of executed Phase 3 runs due to computational constraints.
     \end{itemize}
     \vspace{0.2em}
 \end{frame}
@@ -181,12 +181,6 @@
     \slidecomment{Macro F1 across AST head and embedding pairs, split by dropout; differences are moderate and best configs remain in a similar band.}
 \end{frame}
 
-\begin{frame}{Phase 3: Failure Highlight}
-    \centering
-    \includegraphics[height=0.68\textheight,keepaspectratio]{phase_3_failure_highlight.png}
-    \slidecomment{Collapse-rate analysis confirms reliability differences: ConvNeXt has the fewest severe failures, MLP-Mixer the most. Results with $\text{F1}<0.5$, worse than random.}
-\end{frame}
-
 \begin{frame}{Training Efficiency (ConvNeXt vs AST)}
     \centering
     \includegraphics[height=0.68\textheight,keepaspectratio]{training_efficiency_scatter.png}
@@ -203,12 +197,6 @@
     \centering
     \includegraphics[height=0.68\textheight,keepaspectratio]{phase_4_pareto_scatter.png}
     \slidecomment{Flat multiclass and loss reweighting dominate the command-vs-leakage frontier; two-stage detector is not competitive.}
-\end{frame}
-
-\begin{frame}{Phase 4: Silence False Trigger Rate}
-    \centering
-    \includegraphics[height=0.68\textheight,keepaspectratio]{phase_4_silence_false_trigger_rate.png}
-    \slidecomment{Two-stage detector shows a critical failure mode with elevated silence false triggers, which is unacceptable for always-on KWS. Sampling control and flat multiclass have the best silence robustness.}
 \end{frame}
 
 \begin{frame}{Phase 4: Strategy Radar}
